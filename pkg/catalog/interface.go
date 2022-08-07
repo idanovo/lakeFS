@@ -101,7 +101,7 @@ type Interface interface {
 	ResetEntry(ctx context.Context, repository, branch string, path string) error
 	ResetEntries(ctx context.Context, repository, branch string, prefix string) error
 
-	Commit(ctx context.Context, repository, branch, message, committer string, metadata Metadata, date *int64) (*CommitLog, error)
+	Commit(ctx context.Context, repository, branch, message, committer string, metadata Metadata, date *int64, sourceMetarange *string) (*CommitLog, error)
 	GetCommit(ctx context.Context, repository, reference string) (*CommitLog, error)
 	ListCommits(ctx context.Context, repository, branch string, params LogParams) ([]*CommitLog, bool, error)
 
@@ -112,7 +112,7 @@ type Interface interface {
 	Compare(ctx context.Context, repository, leftReference string, rightReference string, params DiffParams) (Differences, bool, error)
 	DiffUncommitted(ctx context.Context, repository, branch, prefix, delimiter string, limit int, after string) (Differences, bool, error)
 
-	Merge(ctx context.Context, repository, destinationBranch, sourceRef, committer, message string, metadata Metadata) (string, error)
+	Merge(ctx context.Context, repository, destinationBranch, sourceRef, committer, message string, metadata Metadata, strategy string) (string, error)
 
 	// dump/load metadata
 	DumpCommits(ctx context.Context, repositoryID string) (string, error)
@@ -123,9 +123,11 @@ type Interface interface {
 	LoadTags(ctx context.Context, repositoryID, tagsMetaRangeID string) error
 
 	// forward metadata for thick clients
-	GetMetaRange(ctx context.Context, repositoryID, metaRangeID string) (graveler.MetaRangeInfo, error)
-	GetRange(ctx context.Context, repositoryID, rangeID string) (graveler.RangeInfo, error)
+	GetMetaRange(ctx context.Context, repositoryID, metaRangeID string) (graveler.MetaRangeAddress, error)
+	GetRange(ctx context.Context, repositoryID, rangeID string) (graveler.RangeAddress, error)
 
+	WriteRange(ctx context.Context, repositoryID, fromSourceURI, prepend, after, continuationToken string) (*graveler.RangeInfo, *Mark, error)
+	WriteMetaRange(ctx context.Context, repositoryID string, ranges []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error)
 	GetGarbageCollectionRules(ctx context.Context, repositoryID string) (*graveler.GarbageCollectionRules, error)
 	SetGarbageCollectionRules(ctx context.Context, repositoryID string, rules *graveler.GarbageCollectionRules) error
 	PrepareExpiredCommits(ctx context.Context, repositoryID string, previousRunID string) (*graveler.GarbageCollectionRunMetadata, error)

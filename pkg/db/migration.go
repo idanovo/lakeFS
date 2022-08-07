@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -12,9 +13,10 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/httpfs"
-	"github.com/rakyll/statik/fs"
 	"github.com/treeverse/lakefs/pkg/db/params"
 	"github.com/treeverse/lakefs/pkg/ddl"
+	_ "github.com/treeverse/lakefs/pkg/kv/dynamodb"
+	kvpg "github.com/treeverse/lakefs/pkg/kv/postgres"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"gopkg.in/retry.v1"
 )
@@ -51,13 +53,9 @@ func (d *DatabaseMigrator) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func getStatikSrc() (source.Driver, error) {
-	// statik fs to our migrate source
-	migrationFs, err := fs.NewWithNamespace(ddl.Ddl)
-	if err != nil {
-		return nil, err
-	}
-	return httpfs.New(migrationFs, "/")
+// newDriverSourceForDDLContent migration driver source with our DDL content
+func newDriverSourceForDDLContent() (source.Driver, error) {
+	return httpfs.New(http.FS(ddl.Content), "/")
 }
 
 func ValidateSchemaUpToDate(ctx context.Context, dbPool Database, params params.Database) error {
@@ -76,7 +74,7 @@ func ValidateSchemaUpToDate(ctx context.Context, dbPool Database, params params.
 }
 
 func GetLastMigrationAvailable() (uint, error) {
-	src, err := getStatikSrc()
+	src, err := newDriverSourceForDDLContent()
 	if err != nil {
 		return 0, err
 	}
@@ -100,7 +98,7 @@ func GetLastMigrationAvailable() (uint, error) {
 }
 
 func getMigrate(params params.Database) (*migrate.Migrate, error) {
-	src, err := getStatikSrc()
+	src, err := newDriverSourceForDDLContent()
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +170,10 @@ func MigrateUp(p params.Database) error {
 	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return err
 	}
-	return nil
+	ctx := context.Background()
+	d := BuildDatabaseConnection(ctx, p)
+	defer d.Close()
+	return kvpg.Migrate(ctx, d.Pool(), p)
 }
 
 func MigrateDown(params params.Database) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/crypt"
 	"github.com/treeverse/lakefs/pkg/db"
+	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/stats"
 	"github.com/treeverse/lakefs/pkg/version"
@@ -50,11 +51,26 @@ var setupCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		authService := auth.NewDBAuthService(
-			dbPool,
-			crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
-			cfg.GetAuthCacheConfig())
-		metadataManager := auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
+		var (
+			authService     auth.Service
+			metadataManager auth.MetadataManager
+		)
+		authLogger := logging.Default().WithField("service", "auth_service")
+		if dbParams.KVEnabled {
+			kvparams := cfg.GetKVParams()
+			kvStore, err := kv.Open(ctx, dbParams.Type, kvparams)
+			if err != nil {
+				fmt.Printf("failed to open KV store: %s\n", err)
+				os.Exit(1)
+			}
+			storeMessage := &kv.StoreMessage{Store: kvStore}
+			authService = auth.NewKVAuthService(storeMessage, crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()), nil, cfg.GetAuthCacheConfig(), authLogger)
+			metadataManager = auth.NewKVMetadataManager(version.Version, cfg.GetFixedInstallationID(), cfg.GetDatabaseParams().Type, kvStore)
+		} else {
+			authService = auth.NewDBAuthService(dbPool, crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()), nil, cfg.GetAuthCacheConfig(), authLogger)
+			metadataManager = auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
+		}
+
 		cloudMetadataProvider := stats.BuildMetadataProvider(logging.Default(), cfg)
 		metadata := stats.NewMetadata(ctx, logging.Default(), cfg.GetBlockstoreType(), metadataManager, cloudMetadataProvider)
 
@@ -76,7 +92,9 @@ var setupCmd = &cobra.Command{
 
 		ctx, cancelFn := context.WithCancel(ctx)
 		stats := stats.NewBufferedCollector(metadata.InstallationID, cfg)
-		go stats.Run(ctx)
+		stats.Run(ctx)
+		defer stats.Close()
+
 		stats.CollectMetadata(metadata)
 		stats.CollectEvent("global", "init")
 
@@ -84,7 +102,6 @@ var setupCmd = &cobra.Command{
 			credentials.AccessKeyID, credentials.SecretAccessKey)
 
 		cancelFn()
-		<-stats.Done()
 	},
 }
 

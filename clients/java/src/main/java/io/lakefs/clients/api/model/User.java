@@ -41,6 +41,10 @@ public class User {
   @SerializedName(SERIALIZED_NAME_FRIENDLY_NAME)
   private String friendlyName;
 
+  public static final String SERIALIZED_NAME_EMAIL = "email";
+  @SerializedName(SERIALIZED_NAME_EMAIL)
+  private String email;
+
 
   public User id(String id) {
     
@@ -49,11 +53,11 @@ public class User {
   }
 
    /**
-   * Get id
+   * a unique identifier for the user. In password-based authentication, this is the email.
    * @return id
   **/
   @javax.annotation.Nonnull
-  @ApiModelProperty(required = true, value = "")
+  @ApiModelProperty(required = true, value = "a unique identifier for the user. In password-based authentication, this is the email.")
 
   public String getId() {
     return id;
@@ -111,6 +115,29 @@ public class User {
   }
 
 
+  public User email(String email) {
+    
+    this.email = email;
+    return this;
+  }
+
+   /**
+   * Get email
+   * @return email
+  **/
+  @javax.annotation.Nullable
+  @ApiModelProperty(value = "")
+
+  public String getEmail() {
+    return email;
+  }
+
+
+  public void setEmail(String email) {
+    this.email = email;
+  }
+
+
   @Override
   public boolean equals(Object o) {
     if (this == o) {
@@ -122,12 +149,13 @@ public class User {
     User user = (User) o;
     return Objects.equals(this.id, user.id) &&
         Objects.equals(this.creationDate, user.creationDate) &&
-        Objects.equals(this.friendlyName, user.friendlyName);
+        Objects.equals(this.friendlyName, user.friendlyName) &&
+        Objects.equals(this.email, user.email);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(id, creationDate, friendlyName);
+    return Objects.hash(id, creationDate, friendlyName, email);
   }
 
   @Override
@@ -137,6 +165,7 @@ public class User {
     sb.append("    id: ").append(toIndentedString(id)).append("\n");
     sb.append("    creationDate: ").append(toIndentedString(creationDate)).append("\n");
     sb.append("    friendlyName: ").append(toIndentedString(friendlyName)).append("\n");
+    sb.append("    email: ").append(toIndentedString(email)).append("\n");
     sb.append("}");
     return sb.toString();
   }

@@ -68,11 +68,11 @@ func (g *FakeGraveler) DumpTags(ctx context.Context, repositoryID graveler.Repos
 	panic("implement me")
 }
 
-func (g *FakeGraveler) GetMetaRange(ctx context.Context, repositoryID graveler.RepositoryID, metaRangeID graveler.MetaRangeID) (graveler.MetaRangeInfo, error) {
+func (g *FakeGraveler) GetMetaRange(ctx context.Context, repositoryID graveler.RepositoryID, metaRangeID graveler.MetaRangeID) (graveler.MetaRangeAddress, error) {
 	panic("implement me")
 }
 
-func (g *FakeGraveler) GetRange(ctx context.Context, repositoryID graveler.RepositoryID, rangeID graveler.RangeID) (graveler.RangeInfo, error) {
+func (g *FakeGraveler) GetRange(ctx context.Context, repositoryID graveler.RepositoryID, rangeID graveler.RangeID) (graveler.RangeAddress, error) {
 	panic("implement me")
 }
 
@@ -197,6 +197,14 @@ func (g *FakeGraveler) Commit(ctx context.Context, repositoryID graveler.Reposit
 	panic("implement me")
 }
 
+func (g *FakeGraveler) WriteRange(ctx context.Context, repositoryID graveler.RepositoryID, it graveler.ValueIterator) (*graveler.RangeInfo, error) {
+	panic("implement me")
+}
+
+func (g *FakeGraveler) WriteMetaRange(ctx context.Context, repositoryID graveler.RepositoryID, ranges []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
+	panic("implement me")
+}
+
 func (g *FakeGraveler) GetCommit(ctx context.Context, repositoryID graveler.RepositoryID, commitID graveler.CommitID) (*graveler.Commit, error) {
 	panic("implement me")
 }
@@ -221,7 +229,7 @@ func (g *FakeGraveler) Revert(_ context.Context, _ graveler.RepositoryID, _ grav
 	panic("implement me")
 }
 
-func (g *FakeGraveler) Merge(ctx context.Context, repositoryID graveler.RepositoryID, destination graveler.BranchID, source graveler.Ref, _ graveler.CommitParams) (graveler.CommitID, error) {
+func (g *FakeGraveler) Merge(ctx context.Context, repositoryID graveler.RepositoryID, destination graveler.BranchID, source graveler.Ref, _ graveler.CommitParams, strategy string) (graveler.CommitID, error) {
 	panic("implement me")
 }
 
@@ -262,7 +270,7 @@ func (g *FakeGraveler) AddCommitNoLock(_ context.Context, _ graveler.RepositoryI
 	panic("implement me")
 }
 
-func (g *FakeGraveler) WriteMetaRange(_ context.Context, _ graveler.RepositoryID, _ graveler.ValueIterator) (*graveler.MetaRangeID, error) {
+func (g *FakeGraveler) WriteMetaRangeByIterator(_ context.Context, _ graveler.RepositoryID, _ graveler.ValueIterator) (*graveler.MetaRangeID, error) {
 	panic("implement me")
 }
 

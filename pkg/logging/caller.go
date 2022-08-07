@@ -15,7 +15,7 @@ var (
 
 	// Positions in the call stack when tracing to report the calling method
 	// start at the bottom of the stack before the package-name cache is primed
-	minimumCallerDepth int = 1
+	minimumCallerDepth = 1
 
 	// Used for caller information initialisation
 	callerInitOnce sync.Once
@@ -45,7 +45,7 @@ func getPackageName(f string) string {
 func getCaller() *runtime.Frame {
 	// cache this package's fully-qualified name
 	callerInitOnce.Do(func() {
-		pcs := make([]uintptr, 2)
+		pcs := make([]uintptr, 2) //nolint: gomnd
 		_ = runtime.Callers(0, pcs)
 		loggingPackage = getPackageName(runtime.FuncForPC(pcs[1]).Name())
 

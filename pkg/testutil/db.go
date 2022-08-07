@@ -2,12 +2,16 @@ package testutil
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/aws/aws-sdk-go/aws"
@@ -17,21 +21,28 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/ory/dockertest/v3"
+	"github.com/stretchr/testify/require"
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/block/gs"
 	"github.com/treeverse/lakefs/pkg/block/mem"
 	lakefsS3 "github.com/treeverse/lakefs/pkg/block/s3"
 	"github.com/treeverse/lakefs/pkg/db"
 	"github.com/treeverse/lakefs/pkg/db/params"
+	"github.com/treeverse/lakefs/pkg/kv"
+	"github.com/treeverse/lakefs/pkg/version"
 )
 
 const (
+	DBName                    = "lakefs_db"
 	DBContainerTimeoutSeconds = 60 * 30 // 30 minutes
 
 	EnvKeyUseBlockAdapter = "USE_BLOCK_ADAPTER"
 	envKeyAwsKeyID        = "AWS_ACCESS_KEY_ID"
 	envKeyAwsSecretKey    = "AWS_SECRET_ACCESS_KEY" //nolint:gosec
 	envKeyAwsRegion       = "AWS_DEFAULT_REGION"
+
+	testMigrateValue = "This is a test value"
+	testPartitionKey = "This is a test partition key"
 )
 
 var keepDB = flag.Bool("keep-db", false, "keep test DB instance running")
@@ -62,7 +73,7 @@ func GetDBInstance(pool *dockertest.Pool) (string, func()) {
 	resource, err := pool.Run("postgres", "11", []string{
 		"POSTGRES_USER=lakefs",
 		"POSTGRES_PASSWORD=lakefs",
-		"POSTGRES_DB=lakefs_db",
+		fmt.Sprintf("POSTGRES_DB=%s", DBName),
 	})
 	if err != nil {
 		log.Fatalf("Could not start postgresql: %s", err)
@@ -103,7 +114,7 @@ func GetDBInstance(pool *dockertest.Pool) (string, func()) {
 
 func formatPostgresResourceURI(resource *dockertest.Resource) string {
 	dbParams := map[string]string{
-		"POSTGRES_DB":       "lakefs_db",
+		"POSTGRES_DB":       DBName,
 		"POSTGRES_USER":     "lakefs",
 		"POSTGRES_PASSWORD": "lakefs",
 		"POSTGRES_PORT":     resource.GetPort("5432/tcp"),
@@ -241,5 +252,100 @@ func NewBlockAdapterByType(t testing.TB, translator block.UploadIDTranslator, bl
 
 	default:
 		return mem.New(mem.WithTranslator(translator))
+	}
+}
+
+// migrate functions for test scenarios
+
+func MigrateEmpty(_ context.Context, _ *pgxpool.Pool, _ io.Writer) error {
+	return nil
+}
+
+func MigrateBasic(_ context.Context, _ *pgxpool.Pool, writer io.Writer) error {
+	buildTestData(1, 5, writer) //nolint: gomnd
+	return nil
+}
+
+func MigrateNoHeader(_ context.Context, _ *pgxpool.Pool, writer io.Writer) error {
+	jd := json.NewEncoder(writer)
+
+	for i := 1; i < 5; i++ {
+		err := jd.Encode(kv.Entry{
+			PartitionKey: []byte(strconv.Itoa(i)),
+			Key:          []byte(strconv.Itoa(i)),
+			Value:        []byte(fmt.Sprint(i, ". ", testMigrateValue)),
+		})
+		if err != nil {
+			log.Fatal("Failed to encode struct")
+		}
+	}
+	return nil
+}
+
+func MigrateBadEntry(_ context.Context, _ *pgxpool.Pool, writer io.Writer) error {
+	jd := json.NewEncoder(writer)
+
+	err := jd.Encode(kv.Entry{
+		Key:   []byte("test"),
+		Value: nil,
+	})
+	if err != nil {
+		log.Fatal("Failed to encode struct")
+	}
+	return nil
+}
+
+func MigrateParallel(_ context.Context, _ *pgxpool.Pool, writer io.Writer) error {
+	const index = 6                 // Magic number WA
+	buildTestData(index, 5, writer) //nolint: gomnd
+	return nil
+}
+
+func ValidateKV(ctx context.Context, t *testing.T, store kv.Store, entries int) {
+	for i := 1; i <= entries; i++ {
+		expectedVal := fmt.Sprint(i, ". ", testMigrateValue)
+		res, err := store.Get(ctx, []byte(testPartitionKey), []byte(strconv.Itoa(i)))
+		require.NoError(t, err)
+		require.Equal(t, expectedVal, string(res.Value))
+	}
+}
+
+func CleanupKV(ctx context.Context, t *testing.T, store kv.Store) {
+	t.Helper()
+
+	scan, err := store.Scan(ctx, []byte(testPartitionKey), []byte{0})
+	MustDo(t, "scan store", err)
+	defer scan.Close()
+
+	for scan.Next() {
+		ent := scan.Entry()
+		MustDo(t, "Clean store", store.Delete(ctx, ent.PartitionKey, ent.Key))
+	}
+
+	// Zero KV version
+	MustDo(t, "Reset migration", store.Set(ctx, []byte(kv.MetadataPartitionKey), []byte(kv.DBSchemaVersionKey), []byte("0")))
+}
+
+func buildTestData(startIdx, count int, writer io.Writer) {
+	jd := json.NewEncoder(writer)
+
+	err := jd.Encode(kv.Header{
+		LakeFSVersion:   version.Version,
+		PackageName:     "test_package_name",
+		DBSchemaVersion: kv.InitialMigrateVersion,
+		CreatedAt:       time.Now(),
+	})
+	if err != nil {
+		log.Fatal("Failed to encode struct")
+	}
+	for i := startIdx; i < startIdx+count; i++ {
+		err = jd.Encode(kv.Entry{
+			PartitionKey: []byte(testPartitionKey),
+			Key:          []byte(strconv.Itoa(i)),
+			Value:        []byte(fmt.Sprint(i, ". ", testMigrateValue)),
+		})
+		if err != nil {
+			log.Fatal("Failed to encode struct")
+		}
 	}
 }

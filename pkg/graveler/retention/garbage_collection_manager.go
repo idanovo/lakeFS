@@ -12,23 +12,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/block/adapter"
-	"github.com/treeverse/lakefs/pkg/db"
 	"github.com/treeverse/lakefs/pkg/graveler"
-	"github.com/treeverse/lakefs/pkg/graveler/ref"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	configFileSuffixTemplate    = "/%s/retention/gc/rules/config.json"
-	addressesFilePrefixTemplate = "/%s/retention/gc/addresses/"
-	commitsFileSuffixTemplate   = "/%s/retention/gc/commits/run_id=%s/commits.csv"
+	configFileSuffixTemplate    = "%s/retention/gc/rules/config.json"
+	addressesFilePrefixTemplate = "%s/retention/gc/addresses/"
+	commitsFileSuffixTemplate   = "%s/retention/gc/commits/run_id=%s/commits.csv"
 )
 
 type GarbageCollectionManager struct {
 	blockAdapter                block.Adapter
 	refManager                  graveler.RefManager
 	committedBlockStoragePrefix string
-	db                          db.Database
 }
 
 func (m *GarbageCollectionManager) GetCommitsCSVLocation(runID string, sn graveler.StorageNamespace) (string, error) {
@@ -58,12 +55,11 @@ func (r *RepositoryCommitGetter) GetCommit(ctx context.Context, commitID gravele
 	return r.refManager.GetCommit(ctx, r.repositoryID, commitID)
 }
 
-func NewGarbageCollectionManager(db db.Database, blockAdapter block.Adapter, refManager graveler.RefManager, committedBlockStoragePrefix string) *GarbageCollectionManager {
+func NewGarbageCollectionManager(blockAdapter block.Adapter, refManager graveler.RefManager, committedBlockStoragePrefix string) *GarbageCollectionManager {
 	return &GarbageCollectionManager{
 		blockAdapter:                blockAdapter,
 		refManager:                  refManager,
 		committedBlockStoragePrefix: committedBlockStoragePrefix,
-		db:                          db,
 	}
 }
 
@@ -145,9 +141,15 @@ func (m *GarbageCollectionManager) SaveGarbageCollectionCommits(ctx context.Cont
 		refManager:   m.refManager,
 		repositoryID: repositoryID,
 	}
-	branchIterator := ref.NewBranchIterator(ctx, m.db, repositoryID, 1000, ref.WithOrderByCommitID())
+	branchIterator, err := m.refManager.GCBranchIterator(ctx, repositoryID)
+	if err != nil {
+		return "", err
+	}
 	// get all commits that are not the first parent of any commit:
-	commitIterator := ref.NewOrderedCommitIterator(ctx, m.db, repositoryID, 1000, ref.WithOnlyAncestryLeaves())
+	commitIterator, err := m.refManager.GCCommitIterator(ctx, repositoryID)
+	if err != nil {
+		return "", fmt.Errorf("create kv orderd commit iterator commits: %w", err)
+	}
 	startingPointIterator := NewGCStartingPointIterator(commitIterator, branchIterator)
 	gcCommits, err := GetGarbageCollectionCommits(ctx, startingPointIterator, commitGetter, rules, previouslyExpiredCommits)
 	if err != nil {

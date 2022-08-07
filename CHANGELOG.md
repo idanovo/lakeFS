@@ -1,4 +1,175 @@
 # Changelog
+## v0.70.0 - 2022-08-03
+
+What's new:
+- Allow OIDC as default login (#3617)
+- Launch a repository with Spark capabilities (#3792)
+- [GC] Respect Hadoop AWS access key configuration in S3Client (#3762)
+- Make GC read the expired addresses csv from Azure blob (#3654)
+- Display README file if available (#3761)
+
+Bug fixes:
+- Fixed diff-viewer version by using a known fork (#3680)
+- Fix cache in auth service api (#3354) 
+
+## v0.69.1 - 2022-07-14
+
+Bug fixes: 
+- Fix crash on group listing by remote API (#3655)
+
+## v0.69.0 - 2022-07-11
+
+Note: this version contains performance and security improvements to the authentication mechanism.
+After upgrading to this version. all current browser sessions will become invalid and users will have to login again.
+
+What's new:
+- OIDC support: manage lakeFS users externally (#3452)
+- Choose merge strategy in the UI (#3581)
+- Templating capability in the lakeFS web server (#3600)
+- Visibility: show branch creation errors in the UI (#3604)
+
+Bug fixes:
+- When a revert results in a conflict, return code 409 instead of 500 (#3538)
+
+## v0.68.0 - 2022-06-21
+
+This release fixes a bug in the garbage collector.
+If you are using cloud storage that is not S3 and have configured a garbage collection policy for retention, you will need to reconfigure it.  (Note that the garbage collector itself does not yet run on such storage!)
+There are no changes if you are using S3.
+
+What's new:
+- UI: Show content diff for conflicts (#3522)
+- lakeFS configuration for audit log level (#3512)
+
+Bug fixes:
+- Fix: Garbage Collector - Eliminate double slash in URL (#3525)
+- Fix: Crash fix on `lakectl superuser` command - missing logging initialization (#3519)
+
+## v0.67.0 - 2022-06-16
+
+What's new:
+- Garbage collection report at end of run (#3127)
+
+Bug fixes:
+- Fix: gateway remove delimiter limitation for list objects v2 API (#3459)
+- Fix: UI policy view fail to update (#3469)
+
+## v0.66.0 - 2022-05-26
+
+What's new:
+- UI: enable server side configuration to apply code snippets (#3398)
+- Upgrade Spark client dependencies to be compatible with M1 (#3420)
+- LAKECTL_INTERACTIVE environment can control lakeCTL on/off terminal output (#3358)
+
+Bug fixes:
+- Fix: Use repository root commit for import branch in import from UI (#3415)
+- Fix: Resource leak on list hooks run (#3424)
+- Fix: Create branch name validation message (#3374)
+- Fix: Evict user from authorization cache to reset password (#3407)
+
+
+## v0.65.0 - 2022-05-16
+
+What's new:
+- Import your data into lakeFS using the UI! (#3233, #3352)
+- Airflow hook wait for DAG completion (#3321)
+- Friendlier post-setup page (#3318)
+- Show skipped hooks for failed action run (#3359)
+
+Bug fixes:
+- Fixed: Revert path shows up when comparing refs (#3291)
+- Fixed: Glue catalog_id parsed as int (#3252)
+- Fixed: login redirects to credentials page (#3319)
+- Fixed: UI create repository not focused on name field (#3342)
+- Fixed link to authentication page vs authorization page (#3337)
+- Fixed: Some URI parameters were not encoded (#3290)
+
+## v0.64.0 - 2022-04-29
+
+This release requires running database migration.
+The lakeFS service will not run if the migration version isn't compatible with the binary.
+Before running the new version you will be required to run migrate, with the new version:
+
+```sh
+$ lakefs migrate up
+```
+
+
+- Fix bug in merge - merge with no changes resolves by creating empty commit (with no data) on destinations head  (#3270)
+- Fix broken content-based diff for changed objects in compare view (#3275)
+- Bump metadata client version to 0.1.7-RC.0 (#3277)
+- Fix logged out user redirect to login (#3283)
+
+## v0.63.0 - 2022-04-17
+
+- Authenticate using an external service (#3178)
+- Fixed bug in repository name validation (#3155)
+- Fixed bug in some argument validations (#3185)
+
+## v0.62.0 - 2022-04-03
+
+This release requires running database migration.
+The lakeFS service will not run if the migration version isn't compatible with the binary.
+Before running the new version you will be required to run migrate, with the new version:
+
+```sh
+$ lakefs migrate up
+```
+
+Features:
+- Update `commit ref` to `commit URI` for `lakectl tag create` command (#3017)
+- `lakectl annotate` now defaults to a non-recursive listing (#3001)
+- `lakectl doctor` command improvements. Part of #3002 (#3023)
+- Don't show GetStarted for empty commit (#3041)
+- Allow ingesting from a non-default S3 endpoint (#3084)
+- Validate new repo isn't using existing storage namespace (#3104)
+- Add additional hook locations (#3130)
+
+Bug fixes:
+- `lakectl annotate` output has superfluous spaces and blank lines (#3007)
+- Fixing restore refs performance issues for old commit dups without "generation" field (#3011)
+- `lakectl config` now hides secret access key (#3039)
+- Fix error capturing and formatting in DB operation failures (#3025)
+- `lakectl ingest` stages more objects than source s3 bucket (#3081)
+- `lakectl ingest` adds multiple excess slash to object name (#3108)
+
+
+## v0.61.0 - 2022-03-07
+Features:
+- Add merge strategy (#2922)
+- DBT: add branch creation capability (#2988)
+
+Bug fixes:
+- Fixing performance issue with ref-restore of commits (#2992)
+
+## v0.60.1 - 2022-03-01
+Features: 
+- Log with multiple outputs (#2975)
+
+Bug fixes: 
+- Bugfix/2935 lakectl bug on not found html (#2966)
+
+## v0.60.0 - 2022-02-27
+Features: 
+- Add a "Default storage namespace" configuration (#2952)
+- lakectl: add a `lakectl doctor` command to run a basic diagnose on lakeFS configuration (#2948)
+
+Bug fixes: 
+- Fix diff performance issues (#2968)
+- Improve memory footprint during openapi object upload (#2963)
+- Make "Everything Bagel" Jupyter notebook container support S3A  (#2946)
+
+
+## v0.59.0 - 2022-02-15
+- lakectl: Convert windows paths to S3 style paths on upload (#2932)
+- lakectl: Allow empty commit message with a specified flag (#2927)
+- lakefs: Live configuration reload will change logging level (#2949)
+
+## v0.58.1 - 2022-02-09
+- Merge operation optimized by another 20%! (#2884)
+- Improved the output verbosity of the `lakectl dbt` tool. (#2895)
+- Usage examples added in `lakectl repo create` command. (#2900)
+- Fixed misleading errors on branch creation. (#2859)
 
 ## v0.58.0 - 2022-01-26
 

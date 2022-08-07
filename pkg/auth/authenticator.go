@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+	"github.com/hashicorp/go-multierror"
 	"github.com/treeverse/lakefs/pkg/auth/model"
 	"github.com/treeverse/lakefs/pkg/logging"
 )
@@ -21,7 +22,7 @@ import (
 type Authenticator interface {
 	// AuthenticateUser authenticates a user matching username and
 	// password and returns their ID.
-	AuthenticateUser(ctx context.Context, username, password string) (int, error)
+	AuthenticateUser(ctx context.Context, username, password string) (string, error)
 }
 
 // Credentialler fetches S3-style credentials for access keys.
@@ -39,21 +40,43 @@ func NewChainAuthenticator(auth ...Authenticator) Authenticator {
 // order, returning the last error in case all fail.
 type ChainAuthenticator []Authenticator
 
-func (ca ChainAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (int, error) {
-	var (
-		err error
-		id  int
-	)
+func (ca ChainAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (string, error) {
+	var merr *multierror.Error
 	logger := logging.FromContext(ctx).WithField("username", username)
 	for _, a := range ca {
-		id, err = a.AuthenticateUser(ctx, username, password)
+		id, err := a.AuthenticateUser(ctx, username, password)
 		if err == nil {
 			return id, nil
 		}
 		// TODO(ariels): Add authenticator ID here.
-		logger.WithError(err).Info("Failed to authenticate user")
+		merr = multierror.Append(merr, fmt.Errorf("%s: %w", a, err))
 	}
-	return InvalidUserID, err
+	logger.WithError(merr).Info("Failed to authenticate user")
+	return InvalidUserID, merr
+}
+
+type EmailAuthenticator struct {
+	AuthService Service
+}
+
+func NewEmailAuthenticator(service Service) *EmailAuthenticator {
+	return &EmailAuthenticator{AuthService: service}
+}
+
+func (e EmailAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (string, error) {
+	user, err := e.AuthService.GetUserByEmail(ctx, username)
+	if err != nil {
+		return InvalidUserID, err
+	}
+
+	if err := user.Authenticate(password); err != nil {
+		return InvalidUserID, err
+	}
+	return user.Username, nil
+}
+
+func (e EmailAuthenticator) String() string {
+	return "email authenticator"
 }
 
 // BuiltinAuthenticator authenticates users by their access key IDs and
@@ -66,7 +89,7 @@ func NewBuiltinAuthenticator(service Service) *BuiltinAuthenticator {
 	return &BuiltinAuthenticator{creds: service}
 }
 
-func (ba *BuiltinAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (int, error) {
+func (ba *BuiltinAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (string, error) {
 	// Look user up in DB.  username is really the access key ID.
 	cred, err := ba.creds.GetCredentials(ctx, username)
 	if err != nil {
@@ -75,7 +98,11 @@ func (ba *BuiltinAuthenticator) AuthenticateUser(ctx context.Context, username, 
 	if subtle.ConstantTimeCompare([]byte(password), []byte(cred.SecretAccessKey)) != 1 {
 		return InvalidUserID, ErrInvalidSecretAccessKey
 	}
-	return cred.UserID, nil
+	return cred.Username, nil
+}
+
+func (ba *BuiltinAuthenticator) String() string {
+	return "built in authenticator"
 }
 
 // LDAPAuthenticator authenticates users on an LDAP server.  It currently
@@ -134,7 +161,7 @@ func inBrackets(filter string) string {
 	return fmt.Sprintf("(%s)", filter)
 }
 
-func (la *LDAPAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (int, error) {
+func (la *LDAPAuthenticator) AuthenticateUser(ctx context.Context, username, password string) (string, error) {
 	// There may be multiple authenticators.  Log everything to allow debugging.
 	logger := logging.FromContext(ctx).WithField("username", username)
 	controlConn, err := la.getControlConnection(ctx)
@@ -146,7 +173,7 @@ func (la *LDAPAuthenticator) AuthenticateUser(ctx context.Context, username, pas
 	searchRequest := la.BaseSearchRequest
 	searchRequest.Filter = fmt.Sprintf("(&(%s=%s)%s)", la.UsernameAttribute, ldap.EscapeFilter(username), inBrackets(searchRequest.Filter))
 
-	res, err := controlConn.SearchWithPaging(&searchRequest, 2)
+	res, err := controlConn.SearchWithPaging(&searchRequest, 2) //nolint: gomnd
 	if err != nil {
 		logger.WithError(err).Error("Failed to search for DN by username")
 		if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -191,20 +218,19 @@ func (la *LDAPAuthenticator) AuthenticateUser(ctx context.Context, username, pas
 	user, err := la.AuthService.GetUser(ctx, dn)
 	if err == nil {
 		logger.WithField("user", fmt.Sprintf("%+v", user)).Debug("Got existing user")
-		return user.ID, nil
+		return user.Username, nil
 	}
-
 	if !errors.Is(err, ErrNotFound) {
 		logger.WithError(err).Info("Could not get user; create them")
 	}
 
-	user = &model.User{
+	newUser := &model.User{
 		CreatedAt:    time.Now(),
 		Username:     dn,
 		FriendlyName: &username,
 		Source:       "ldap",
 	}
-	id, err := la.AuthService.CreateUser(ctx, user)
+	_, err = la.AuthService.CreateUser(ctx, newUser)
 	if err != nil {
 		return InvalidUserID, fmt.Errorf("create backing user for LDAP user %s: %w", dn, err)
 	}
@@ -217,5 +243,9 @@ func (la *LDAPAuthenticator) AuthenticateUser(ctx context.Context, username, pas
 	if err != nil {
 		return InvalidUserID, fmt.Errorf("add newly created LDAP user %s to %s: %w", dn, la.DefaultUserGroup, err)
 	}
-	return id, nil
+	return newUser.Username, nil
+}
+
+func (la *LDAPAuthenticator) String() string {
+	return "LDAP authenticator"
 }

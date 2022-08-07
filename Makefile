@@ -56,7 +56,7 @@ GIT_REF=$(shell git rev-parse --short HEAD --)
 REVISION=$(GIT_REF)$(DIRTY)
 export REVISION
 
-.PHONY: all clean nessie lint test gen help
+.PHONY: all clean esti lint test gen help
 all: build
 
 clean:
@@ -64,23 +64,23 @@ clean:
 		$(LAKECTL_BINARY_NAME) \
 		$(LAKEFS_BINARY_NAME) \
 		$(UI_BUILD_DIR) \
+		$(UI_DIR)/node_modules \
 		pkg/actions/mock \
 		pkg/api/lakefs.gen.go \
-		pkg/ddl/statik.go \
+		pkg/auth/client.gen.go \
 		pkg/graveler/sstable/mock \
-		pkg/webui \
 	    pkg/graveler/committed/mock \
 	    pkg/graveler/mock
 
 check-licenses: check-licenses-go-mod check-licenses-npm
 
 check-licenses-go-mod:
-	go get github.com/google/go-licenses
+	$(GOCMD) install github.com/google/go-licenses@latest
 	$(GOBINPATH)/go-licenses check ./cmd/$(LAKEFS_BINARY_NAME)
 	$(GOBINPATH)/go-licenses check ./cmd/$(LAKECTL_BINARY_NAME)
 
 check-licenses-npm:
-	go get github.com/senseyeio/diligent/cmd/diligent
+	$(GOCMD) install github.com/senseyeio/diligent/cmd/diligent@latest
 	# The -i arg is a workaround to ignore NPM scoped packages until https://github.com/senseyeio/diligent/issues/77 is fixed
 	$(GOBINPATH)/diligent check -w permissive -i ^@[^/]+?/[^/]+ $(UI_DIR)
 
@@ -105,7 +105,6 @@ go-install: go-mod-download ## Install dependencies
 	$(GOCMD) install github.com/deepmap/oapi-codegen/cmd/oapi-codegen
 	$(GOCMD) install github.com/golang/mock/mockgen
 	$(GOCMD) install github.com/golangci/golangci-lint/cmd/golangci-lint
-	$(GOCMD) install github.com/rakyll/statik
 	$(GOCMD) install google.golang.org/protobuf/cmd/protoc-gen-go
 
 
@@ -127,7 +126,7 @@ client-java: api/swagger.yml  ## Generate SDK for Java (and Scala) client
 		-i /mnt/$< \
 		-g java \
 		--invoker-package io.lakefs.clients.api \
-		--additional-properties=hideGenerationTimestamp=true,artifactVersion=$(PACKAGE_VERSION),parentArtifactId=lakefs-parent,parentGroupId=io.lakefs,parentVersion=0,groupId=io.lakefs,artifactId='api-client',artifactDescription='lakeFS OpenAPI Java client',artifactUrl=https://github.com/treeverse/lakeFS/tree/master/clients,apiPackage=io.lakefs.clients.api,modelPackage=io.lakefs.clients.api.model,mainPackage=io.lakefs.clients.api,developerEmail=services@treeverse.io,developerName='Treeverse lakeFS dev',developerOrganization='lakefs.io',developerOrganizationUrl='https://lakefs.io',licenseName=apache2,licenseUrl=http://www.apache.org/licenses/,scmConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmDeveloperConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmUrl=https://github.com/treeverse/lakeFS \
+		--additional-properties=hideGenerationTimestamp=true,artifactVersion=$(PACKAGE_VERSION),parentArtifactId=lakefs-parent,parentGroupId=io.lakefs,parentVersion=0,groupId=io.lakefs,artifactId='api-client',artifactDescription='lakeFS OpenAPI Java client',artifactUrl=https://lakefs.io,apiPackage=io.lakefs.clients.api,modelPackage=io.lakefs.clients.api.model,mainPackage=io.lakefs.clients.api,developerEmail=services@treeverse.io,developerName='Treeverse lakeFS dev',developerOrganization='lakefs.io',developerOrganizationUrl='https://lakefs.io',licenseName=apache2,licenseUrl=http://www.apache.org/licenses/,scmConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmDeveloperConnection=scm:git:git@github.com:treeverse/lakeFS.git,scmUrl=https://github.com/treeverse/lakeFS \
 		-o /mnt/clients/java
 
 .PHONY: clients client-python client-java
@@ -141,15 +140,18 @@ package: package-python
 
 gen-api: go-install ## Run the swagger code generator
 	$(GOGENERATE) ./pkg/api
+	$(GOGENERATE) ./pkg/auth
 
-.PHONY: gen-mockgen
-gen-mockgen: go-install ## Run the generator for inline commands
-	$(GOGENERATE) ./pkg/graveler/sstable
-	$(GOGENERATE) ./pkg/graveler/committed
-	$(GOGENERATE) ./pkg/graveler
-	$(GOGENERATE) ./pkg/pyramid
-	$(GOGENERATE) ./pkg/onboard
-	$(GOGENERATE) ./pkg/actions
+.PHONY: gen-code
+gen-code: go-install ## Run the generator for inline commands
+	$(GOGENERATE) \
+		./pkg/graveler/sstable \
+		./pkg/graveler/committed \
+		./pkg/graveler \
+		./pkg/pyramid \
+		./pkg/onboard \
+		./pkg/actions \
+		./pkg/auth
 
 LD_FLAGS := "-X github.com/treeverse/lakefs/pkg/version.Version=$(VERSION)-$(REVISION)"
 build: gen docs ## Download dependencies and build the default binary
@@ -158,9 +160,10 @@ build: gen docs ## Download dependencies and build the default binary
 
 lint: go-install  ## Lint code
 	$(GOBINPATH)/golangci-lint run $(GOLANGCI_LINT_FLAGS)
+	npx eslint $(UI_DIR)/src --ext .js,.jsx,.ts,.tsx
 
-nessie: ## run nessie (system testing)
-	$(GOTEST) -v ./nessie --args --system-tests
+esti: ## run esti (system testing)
+	$(GOTEST) -v ./esti --args --system-tests
 
 test: test-go test-hadoopfs  ## Run tests for the project
 
@@ -178,6 +181,9 @@ fast-test:  ## Run tests without race detector (faster)
 
 test-html: test  ## Run tests with HTML for the project
 	$(GOTOOL) cover -html=cover.out
+
+system-tests: # Run system tests locally
+	./esti/scripts/runner.sh -r all
 
 build-docker: build ## Build Docker image file (Docker required)
 	$(DOCKER) build -t treeverse/$(DOCKER_IMAGE):$(DOCKER_TAG) .
@@ -223,19 +229,18 @@ $(UI_DIR)/node_modules:
 ui-build: $(UI_DIR)/node_modules  ## Build UI app
 	cd $(UI_DIR) && $(NPM) run build
 
-ui-bundle: ui-build go-install ## Bundle static built UI app
-	$(GOBINPATH)/statik -src=$(UI_BUILD_DIR) -dest=pkg -p=webui -ns=webui -f
-
-gen-ui: ui-bundle
-
-gen-ddl: go-install ## Embed data migration files into the resulting binary
-	$(GOBINPATH)/statik -ns ddl -m -f -p ddl -c "auto-generated SQL files for data migrations" -dest pkg -src pkg/ddl -include '*.sql'
+gen-ui: ui-build
 
 proto: ## Build proto (Protocol Buffers) files
 	$(PROTOC) --proto_path=pkg/catalog --go_out=pkg/catalog --go_opt=paths=source_relative catalog.proto
 	$(PROTOC) --proto_path=pkg/graveler/committed --go_out=pkg/graveler/committed --go_opt=paths=source_relative committed.proto
 	$(PROTOC) --proto_path=pkg/graveler --go_out=pkg/graveler --go_opt=paths=source_relative graveler.proto
 	$(PROTOC) --proto_path=pkg/graveler/settings --go_out=pkg/graveler/settings --go_opt=paths=source_relative test_settings.proto
+	$(PROTOC) --proto_path=pkg/kv/kvtest --go_out=pkg/kv/kvtest --go_opt=paths=source_relative test_model.proto
+	$(PROTOC) --proto_path=pkg/kv --go_out=pkg/kv --go_opt=paths=source_relative secondary_index.proto
+	$(PROTOC) --proto_path=pkg/gateway/multiparts --go_out=pkg/gateway/multiparts --go_opt=paths=source_relative multipart.proto
+	$(PROTOC) --proto_path=pkg/actions --go_out=pkg/actions --go_opt=paths=source_relative actions.proto
+	$(PROTOC) --proto_path=pkg/auth/model --go_out=pkg/auth/model --go_opt=paths=source_relative model.proto
 
 publish-scala: ## sbt publish spark client jars to nexus and s3 bucket
 	cd clients/spark && sbt assembly && sbt s3Upload && sbt publishSigned
@@ -249,4 +254,4 @@ help:  ## Show Help menu
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 # helpers
-gen: gen-api gen-ui gen-ddl gen-mockgen clients gen-docs
+gen: gen-api gen-ui gen-code clients gen-docs

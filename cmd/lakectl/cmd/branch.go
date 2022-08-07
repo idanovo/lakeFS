@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,7 +37,7 @@ var branchListCmd = &cobra.Command{
 			After:  api.PaginationAfterPtr(after),
 			Amount: api.PaginationAmountPtr(amount),
 		})
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
 
 		refs := resp.JSON200.Results
 		rows := make([][]interface{}, len(refs))
@@ -50,11 +51,12 @@ var branchListCmd = &cobra.Command{
 }
 
 var branchCreateCmd = &cobra.Command{
-	Use:   "create <ref uri>",
-	Short: "Create a new branch in a repository",
-	Args:  cobra.ExactArgs(1),
+	Use:     "create <branch uri> -s <source ref uri>",
+	Short:   "Create a new branch in a repository",
+	Example: "lakectl branch create lakefs://example-repo/new-branch -s lakefs://example-repo/main",
+	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		u := MustParseRefURI("branch", args[0])
+		u := MustParseBranchURI("branch", args[0])
 		client := getClient()
 		sourceRawURI, _ := cmd.Flags().GetString("source")
 		sourceURI, err := uri.ParseWithBaseURI(sourceRawURI, baseURI)
@@ -70,25 +72,26 @@ var branchCreateCmd = &cobra.Command{
 			Name:   u.Ref,
 			Source: sourceURI.Ref,
 		})
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusCreated)
 		Fmt("created branch '%s' %s\n", u.Ref, string(resp.Body))
 	},
 }
 
 var branchDeleteCmd = &cobra.Command{
-	Use:   "delete <branch uri>",
-	Short: "Delete a branch in a repository, along with its uncommitted changes (CAREFUL)",
-	Args:  cobra.ExactArgs(1),
+	Use:     "delete <branch uri>",
+	Short:   "Delete a branch in a repository, along with its uncommitted changes (CAREFUL)",
+	Example: "lakectl branch delete lakefs://example-repo/example-branch",
+	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		confirmation, err := Confirm(cmd.Flags(), "Are you sure you want to delete branch")
 		if err != nil || !confirmation {
 			Die("Delete branch aborted", 1)
 		}
 		client := getClient()
-		u := MustParseRefURI("branch", args[0])
+		u := MustParseBranchURI("branch", args[0])
 		Fmt("Branch: %s\n", u.String())
 		resp, err := client.DeleteBranchWithResponse(cmd.Context(), u.Repository, u.Ref)
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusNoContent)
 	},
 }
 
@@ -103,7 +106,7 @@ var branchRevertCmd = &cobra.Command{
 		      Revert the changes done by the second last commit to the fourth last commit in example-branch`,
 	Args: cobra.MinimumNArgs(branchRevertCmdArgs),
 	Run: func(cmd *cobra.Command, args []string) {
-		u := MustParseRefURI("branch", args[0])
+		u := MustParseBranchURI("branch", args[0])
 		Fmt("Branch: %s\n", u.String())
 		hasParentNumber := cmd.Flags().Changed(ParentNumberFlagName)
 		parentNumber, _ := cmd.Flags().GetInt(ParentNumberFlagName)
@@ -122,7 +125,7 @@ var branchRevertCmd = &cobra.Command{
 				ParentNumber: parentNumber,
 				Ref:          commitRef,
 			})
-			DieOnResponseError(resp, err)
+			DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusNoContent)
 			Fmt("commit %s successfully reverted\n", commitRef)
 		}
 	},
@@ -130,16 +133,17 @@ var branchRevertCmd = &cobra.Command{
 
 // lakectl branch reset lakefs://myrepo/main --commit commitId --prefix path --object path
 var branchResetCmd = &cobra.Command{
-	Use:   "reset <branch uri> [flags]",
-	Short: "Reset changes to specified commit, or reset uncommitted changes - all changes, or by path",
+	Use:     "reset <branch uri> [--prefix|--object]",
+	Example: "lakectl branch reset lakefs://example-repo/example-branch",
+	Short:   "Reset uncommitted changes - all of them, or by path",
 	Long: `reset changes.  There are four different ways to reset changes:
   1. reset all uncommitted changes - reset lakefs://myrepo/main 
-  2. reset uncommitted changes under specific path -	reset lakefs://myrepo/main --prefix path
+  2. reset uncommitted changes under specific path - reset lakefs://myrepo/main --prefix path
   3. reset uncommitted changes for specific object - reset lakefs://myrepo/main --object path`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		clt := getClient()
-		u := MustParseRefURI("branch", args[0])
+		u := MustParseBranchURI("branch", args[0])
 		Fmt("Branch: %s\n", u.String())
 		prefix, err := cmd.Flags().GetString("prefix")
 		if err != nil {
@@ -178,20 +182,21 @@ var branchResetCmd = &cobra.Command{
 			return
 		}
 		resp, err := clt.ResetBranchWithResponse(cmd.Context(), u.Repository, u.Ref, api.ResetBranchJSONRequestBody(reset))
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusNoContent)
 	},
 }
 
 var branchShowCmd = &cobra.Command{
-	Use:   "show <branch uri>",
-	Short: "Show branch latest commit reference",
-	Args:  cobra.ExactArgs(1),
+	Use:     "show <branch uri>",
+	Example: "lakectl branch show lakefs://example-repo/example-branch",
+	Short:   "Show branch latest commit reference",
+	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		client := getClient()
-		u := MustParseRefURI("branch", args[0])
+		u := MustParseBranchURI("branch", args[0])
 		Fmt("Branch: %s\n", u.String())
 		resp, err := client.GetBranchWithResponse(cmd.Context(), u.Repository, u.Ref)
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
 		branch := resp.JSON200
 		Fmt("%s\n", branch)
 	},

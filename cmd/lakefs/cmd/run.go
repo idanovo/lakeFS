@@ -11,18 +11,23 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/dlmiddlecote/sqlstats"
+	"github.com/fsnotify/fsnotify"
 	"github.com/go-ldap/ldap/v3"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"github.com/treeverse/lakefs/pkg/actions"
 	"github.com/treeverse/lakefs/pkg/api"
 	"github.com/treeverse/lakefs/pkg/auth"
 	"github.com/treeverse/lakefs/pkg/auth/crypt"
+	"github.com/treeverse/lakefs/pkg/auth/email"
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/block/factory"
 	"github.com/treeverse/lakefs/pkg/catalog"
@@ -31,11 +36,15 @@ import (
 	"github.com/treeverse/lakefs/pkg/gateway"
 	"github.com/treeverse/lakefs/pkg/gateway/multiparts"
 	"github.com/treeverse/lakefs/pkg/gateway/sig"
-	"github.com/treeverse/lakefs/pkg/gateway/simulator"
 	"github.com/treeverse/lakefs/pkg/httputil"
+	"github.com/treeverse/lakefs/pkg/kv"
+	_ "github.com/treeverse/lakefs/pkg/kv/postgres"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/stats"
+	"github.com/treeverse/lakefs/pkg/templater"
 	"github.com/treeverse/lakefs/pkg/version"
+	"github.com/treeverse/lakefs/templates"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -91,6 +100,13 @@ var runCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		logger := logging.Default()
 		cfg := loadConfig()
+		viper.WatchConfig()
+		viper.OnConfigChange(func(in fsnotify.Event) {
+			lvl := viper.GetString(config.LoggingLevelKey)
+			logger.WithField("toLevel", lvl).Info("Changing log level")
+			logging.SetLevel(lvl)
+		})
+
 		ctx := cmd.Context()
 		logger.WithField("version", version.Version).Info("lakeFS run")
 
@@ -112,30 +128,73 @@ var runCmd = &cobra.Command{
 		registerPrometheusCollector(dbPool)
 		migrator := db.NewDatabaseMigrator(dbParams)
 
-		c, err := catalog.New(ctx, catalog.Config{
-			Config: cfg,
-			DB:     dbPool,
-			LockDB: lockdbPool,
-		})
+		var (
+			multipartsTracker   multiparts.Tracker
+			idGen               actions.IDGenerator
+			actionsStore        actions.Store
+			authService         auth.Service
+			authMetadataManager auth.MetadataManager
+			storeMessage        *kv.StoreMessage
+		)
+		emailParams, _ := cfg.GetEmailParams()
+		emailer, err := email.NewEmailer(emailParams)
 		if err != nil {
-			logger.WithError(err).Fatal("failed to create c")
+			logger.WithError(err).Fatal("Emailer has not been properly configured, check the values in sender field")
 		}
-		defer func() { _ = c.Close() }()
-
-		multipartsTracker := multiparts.NewTracker(dbPool)
-
-		// init authentication
-		authService := auth.NewDBAuthService(
-			dbPool,
-			crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
-			cfg.GetAuthCacheConfig())
-		var authenticator auth.Authenticator = auth.NewBuiltinAuthenticator(authService)
-		ldapConfig := cfg.GetLDAPConfiguration()
-		if ldapConfig != nil {
-			ldapAuthenticator := newLDAPAuthenticator(ldapConfig, authService)
-			authenticator = auth.NewChainAuthenticator(authenticator, ldapAuthenticator)
+		if cfg.IsAuthTypeAPI() {
+			var apiEmailer *email.Emailer
+			if !cfg.GetAuthAPISupportsInvites() {
+				// invites not supported by API - delegate it to emailer
+				apiEmailer = emailer
+			}
+			authService, err = auth.NewAPIAuthService(
+				cfg.GetAuthAPIEndpoint(),
+				cfg.GetAuthAPIToken(),
+				crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
+				cfg.GetAuthCacheConfig(), nil, apiEmailer)
+			if err != nil {
+				logger.WithError(err).Fatal("failed to create authentication service")
+			}
 		}
-		authMetadataManager := auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
+
+		if dbParams.KVEnabled {
+			kvParams := cfg.GetKVParams()
+			kvStore, err := kv.Open(ctx, dbParams.Type, kvParams)
+			if err != nil {
+				logger.WithError(err).Fatal("failed to open KV store")
+			}
+			defer kvStore.Close()
+			storeMessage = &kv.StoreMessage{Store: kvStore}
+
+			multipartsTracker = multiparts.NewTracker(*storeMessage)
+			actionsStore = actions.NewActionsKVStore(kv.StoreMessage{Store: kvStore})
+			idGen = &actions.DecreasingIDGenerator{}
+
+			// init authentication
+			if !cfg.IsAuthTypeAPI() {
+				authService = auth.NewKVAuthService(
+					storeMessage,
+					crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
+					emailer,
+					cfg.GetAuthCacheConfig(),
+					logger.WithField("service", "auth_service"))
+			}
+			authMetadataManager = auth.NewKVMetadataManager(version.Version, cfg.GetFixedInstallationID(), cfg.GetDatabaseParams().Type, kvStore)
+		} else {
+			multipartsTracker = multiparts.NewDBTracker(dbPool)
+			actionsStore = actions.NewActionsDBStore(dbPool)
+			idGen = &actions.IncreasingIDGenerator{}
+			if !cfg.IsAuthTypeAPI() {
+				authService = auth.NewDBAuthService(
+					dbPool,
+					crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
+					emailer,
+					cfg.GetAuthCacheConfig(),
+					logger.WithField("service", "auth_service"))
+			}
+			authMetadataManager = auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
+		}
+
 		cloudMetadataProvider := stats.BuildMetadataProvider(logger, cfg)
 		blockstoreType := cfg.GetBlockstoreType()
 		if blockstoreType == "local" || blockstoreType == "mem" {
@@ -154,17 +213,41 @@ var runCmd = &cobra.Command{
 		// send metadata
 		bufferedCollector.CollectMetadata(metadata)
 
-		// wire actions
+		c, err := catalog.New(ctx, catalog.Config{
+			Config:  cfg,
+			DB:      dbPool,
+			LockDB:  lockdbPool,
+			KVStore: storeMessage,
+		})
+		if err != nil {
+			logger.WithError(err).Fatal("failed to create catalog")
+		}
+		defer func() { _ = c.Close() }()
+
+		templater := templater.NewService(templates.Content, cfg, authService)
+
 		actionsService := actions.NewService(
 			ctx,
-			dbPool,
+			actionsStore,
 			catalog.NewActionsSource(c),
 			catalog.NewActionsOutputWriter(c.BlockAdapter),
+			idGen,
 			bufferedCollector,
 			cfg.GetActionsEnabled(),
 		)
-		c.SetHooksHandler(actionsService)
+
+		// wire actions into entry catalog
 		defer actionsService.Stop()
+		c.SetHooksHandler(actionsService)
+
+		middlewareAuthenticator := auth.ChainAuthenticator{
+			auth.NewBuiltinAuthenticator(authService),
+		}
+		ldapConfig := cfg.GetLDAPConfiguration()
+		if ldapConfig != nil {
+			middlewareAuthenticator = append(middlewareAuthenticator, newLDAPAuthenticator(ldapConfig, authService))
+		}
+		controllerAuthenticator := append(middlewareAuthenticator, auth.NewEmailAuthenticator(authService))
 
 		auditChecker := version.NewDefaultAuditChecker(cfg.GetSecurityAuditCheckURL())
 		defer auditChecker.Close()
@@ -192,10 +275,30 @@ var runCmd = &cobra.Command{
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+		oidcConfig := cfg.GetAuthOIDCConfiguration()
+		var oauthConfig *oauth2.Config
+		var oidcProvider *oidc.Provider
+		if oidcConfig.Enabled {
+			oidcProvider, err = oidc.NewProvider(
+				cmd.Context(),
+				oidcConfig.URL,
+			)
+			if err != nil {
+				logger.WithError(err).Fatal("Failed to initialize OIDC provider")
+			}
+			oauthConfig = &oauth2.Config{
+				ClientID:     oidcConfig.ClientID,
+				ClientSecret: oidcConfig.ClientSecret,
+				RedirectURL:  strings.TrimSuffix(oidcConfig.CallbackBaseURL, "/") + api.BaseURL + "/oidc/callback",
+				Endpoint:     oidcProvider.Endpoint(),
+				Scopes:       []string{oidc.ScopeOpenID, "profile"},
+			}
+		}
 		apiHandler := api.Serve(
 			cfg,
 			c,
-			authenticator,
+			middlewareAuthenticator,
+			controllerAuthenticator,
 			authService,
 			blockStore,
 			authMetadataManager,
@@ -205,7 +308,12 @@ var runCmd = &cobra.Command{
 			actionsService,
 			auditChecker,
 			logger.WithField("service", "api_gateway"),
+			emailer,
+			templater,
 			cfg.GetS3GatewayDomainNames(),
+			cfg.GetUISnippets(),
+			oidcProvider,
+			oauthConfig,
 		)
 
 		// init gateway server
@@ -217,6 +325,15 @@ var runCmd = &cobra.Command{
 				logger.WithError(err).Fatal("Failed to parse s3 fallback URL")
 			}
 		}
+
+		lakefsBaseURL := emailParams.LakefsBaseURL
+		if lakefsBaseURL != "" {
+			_, err := url.Parse(lakefsBaseURL)
+			if err != nil {
+				logger.WithError(err).Warn(fmt.Sprintf("Failed to parse lakefs base url for email, check the value in %s", config.LakefsEmailBaseURLKey))
+			}
+		}
+
 		s3gatewayHandler := gateway.NewHandler(
 			cfg.GetS3GatewayRegion(),
 			c,
@@ -226,10 +343,12 @@ var runCmd = &cobra.Command{
 			cfg.GetS3GatewayDomainNames(),
 			bufferedCollector,
 			s3FallbackURL,
+			cfg.GetAuditLogLevel(),
 			cfg.GetLoggingTraceRequestHeaders(),
 		)
 		ctx, cancelFn := context.WithCancel(cmd.Context())
-		go bufferedCollector.Run(ctx)
+		bufferedCollector.Run(ctx)
+		defer bufferedCollector.Close()
 
 		bufferedCollector.CollectEvent("global", "run")
 
@@ -261,12 +380,11 @@ var runCmd = &cobra.Command{
 
 		<-done
 		cancelFn()
-		<-bufferedCollector.Done()
 	},
 }
 
 // checkRepos iterates on all repos and validates that their settings are correct.
-func checkRepos(ctx context.Context, logger logging.Logger, authMetadataManager *auth.DBMetadataManager, blockStore block.Adapter, c *catalog.Catalog) {
+func checkRepos(ctx context.Context, logger logging.Logger, authMetadataManager auth.MetadataManager, blockStore block.Adapter, c *catalog.Catalog) {
 	initialized, err := authMetadataManager.IsInitialized(ctx)
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to check if lakeFS is initialized")
@@ -406,7 +524,6 @@ func gracefulShutdown(ctx context.Context, quit <-chan os.Signal, done chan<- bo
 			fmt.Printf("Error while shutting down service (%d): %s\n", i, err)
 		}
 	}
-	simulator.ShutdownRecorder()
 	close(done)
 }
 

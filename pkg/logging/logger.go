@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/sirupsen/logrus"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type contextKey string
@@ -51,6 +50,8 @@ const (
 	UserFieldKey = "user"
 	// ServiceNameFieldKey service name (string, ex: rest_api)
 	ServiceNameFieldKey = "service_name"
+	// LogAudit kind of information to audit (string, ex: API)
+	LogAudit = "log_audit"
 )
 
 var (
@@ -97,37 +98,31 @@ func SetLevel(level string) {
 	}
 }
 
-func SetOutput(output string) {
-	if output == "" {
-		return
-	}
-	if output == "-" {
-		defaultLogger.SetOutput(os.Stdout)
-		return
-	}
-
-	handle, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY, 0755)
-	if err != nil {
-		panic(fmt.Errorf("could not open log file: %w", err))
-	}
-	defaultLogger.SetOutput(handle)
-	// setup signal handler to reopen logfile on SIGHUP
-	sigChannel := make(chan os.Signal, 1)
-	signal.Notify(sigChannel, syscall.SIGHUP)
-	go func(filename string) {
-		for {
-			<-sigChannel
-			defaultLogger.Info("SIGHUP received, rotating log file")
-			defaultLogger.SetOutput(io.Discard)
-			_ = handle.Close()
-			handle, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0755)
-			if err != nil {
-				panic(fmt.Errorf("could not open log file: %w", err))
+func SetOutputs(outputs []string, fileMaxSizeMB, filesKeep int) {
+	var writers []io.Writer
+	for _, output := range outputs {
+		var w io.Writer
+		switch output {
+		case "":
+			continue
+		case "-":
+			w = os.Stdout
+		case "=":
+			w = os.Stderr
+		default:
+			w = &lumberjack.Logger{
+				Filename:   output,
+				MaxSize:    fileMaxSizeMB,
+				MaxBackups: filesKeep,
 			}
-			defaultLogger.SetOutput(handle)
-			defaultLogger.Info("log file was rotated successfully")
 		}
-	}(output)
+		writers = append(writers, w)
+	}
+	if len(writers) == 1 {
+		defaultLogger.SetOutput(writers[0])
+	} else if len(writers) > 1 {
+		defaultLogger.SetOutput(io.MultiWriter(writers...))
+	}
 }
 
 func SetOutputFormat(format string) {
@@ -167,6 +162,7 @@ type Logger interface {
 	Error(args ...interface{})
 	Fatal(args ...interface{})
 	Panic(args ...interface{})
+	Log(level logrus.Level, args ...interface{})
 	Tracef(format string, args ...interface{})
 	Debugf(format string, args ...interface{})
 	Infof(format string, args ...interface{})
@@ -175,6 +171,7 @@ type Logger interface {
 	Errorf(format string, args ...interface{})
 	Fatalf(format string, args ...interface{})
 	Panicf(format string, args ...interface{})
+	Logf(level logrus.Level, format string, args ...interface{})
 	IsTracing() bool
 }
 
@@ -233,6 +230,10 @@ func (l logrusEntryWrapper) Panic(args ...interface{}) {
 	l.e.Panic(args...)
 }
 
+func (l logrusEntryWrapper) Log(level logrus.Level, args ...interface{}) {
+	l.e.Log(level, args...)
+}
+
 func (l *logrusEntryWrapper) Tracef(format string, args ...interface{}) {
 	l.e.Tracef(format, args...)
 }
@@ -263,6 +264,10 @@ func (l *logrusEntryWrapper) Fatalf(format string, args ...interface{}) {
 
 func (l *logrusEntryWrapper) Panicf(format string, args ...interface{}) {
 	l.e.Panicf(format, args...)
+}
+
+func (l logrusEntryWrapper) Logf(level logrus.Level, format string, args ...interface{}) {
+	l.e.Logf(level, format, args...)
 }
 
 func (*logrusEntryWrapper) IsTracing() bool {

@@ -47,8 +47,6 @@
 
 # server excludes
 /pkg/api/gen
-/pkg/webui
-/pkg/ddl/statik.go
 .DS_Store
 
 # recordings
@@ -82,6 +80,7 @@ terraform.rc
 /pkg/pyramid/mock/
 /pkg/onboard/mock/
 /pkg/actions/mock/
+/pkg/auth/mock/
 
 .eslintcache
 /clients/java/.openapi-generator/FILES

@@ -17,6 +17,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/cmdutils"
 	"github.com/treeverse/lakefs/pkg/db"
 	"github.com/treeverse/lakefs/pkg/graveler"
+	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/onboard"
 	"github.com/treeverse/lakefs/pkg/stats"
@@ -84,17 +85,6 @@ func runImport(cmd *cobra.Command, args []string) (statusCode int) {
 	}
 	logger := logging.FromContext(ctx)
 
-	catalogCfg := catalog.Config{
-		Config: cfg,
-		DB:     dbPool,
-	}
-	c, err := catalog.New(ctx, catalogCfg)
-	if err != nil {
-		fmt.Printf("Failed to create c: %s\n", err)
-		return 1
-	}
-	defer func() { _ = c.Close() }()
-
 	u := uri.Must(uri.Parse(args[0]))
 	if !u.IsRepository() {
 		fmt.Printf("Invalid 'repository': %s\n", uri.ErrInvalidRefURI)
@@ -118,17 +108,52 @@ func runImport(cmd *cobra.Command, args []string) (statusCode int) {
 	}
 
 	bufferedCollector := stats.NewBufferedCollector(cfg.GetFixedInstallationID(), cfg)
+	defer bufferedCollector.Close()
 	bufferedCollector.SetRuntimeCollector(blockStore.RuntimeStats)
 
-	// wire actions into entry catalog
+	var (
+		idGen        actions.IDGenerator
+		actionsStore actions.Store
+		storeMessage *kv.StoreMessage
+	)
+	if dbParams.KVEnabled {
+		kvparams := cfg.GetKVParams()
+		kvStore, err := kv.Open(ctx, dbParams.Type, kvparams)
+		if err != nil {
+			logger.WithError(err).Fatal("failed to open KV store")
+		}
+		defer kvStore.Close()
+		storeMessage = &kv.StoreMessage{Store: kvStore}
+
+		actionsStore = actions.NewActionsKVStore(*storeMessage)
+		idGen = &actions.DecreasingIDGenerator{}
+	} else {
+		actionsStore = actions.NewActionsDBStore(dbPool)
+		idGen = &actions.IncreasingIDGenerator{}
+	}
+
+	c, err := catalog.New(ctx, catalog.Config{
+		Config:  cfg,
+		DB:      dbPool,
+		KVStore: storeMessage,
+	})
+	if err != nil {
+		fmt.Printf("Failed to create catalog: %s\n", err)
+		return 1
+	}
+	defer func() { _ = c.Close() }()
+
 	actionsService := actions.NewService(
 		ctx,
-		dbPool,
+		actionsStore,
 		catalog.NewActionsSource(c),
 		catalog.NewActionsOutputWriter(c.BlockAdapter),
+		idGen,
 		bufferedCollector,
 		cfg.GetActionsEnabled(),
 	)
+
+	// wire actions into entry catalog
 	c.SetHooksHandler(actionsService)
 	defer actionsService.Stop()
 
@@ -186,7 +211,7 @@ func runImport(cmd *cobra.Command, args []string) (statusCode int) {
 		multiBar = cmdutils.NewMultiBar(importer)
 		multiBar.Start()
 	}
-	stats, err := importer.Import(ctx, dryRun)
+	st, err := importer.Import(ctx, dryRun)
 	if err != nil {
 		if multiBar != nil {
 			multiBar.Stop()
@@ -198,14 +223,14 @@ func runImport(cmd *cobra.Command, args []string) (statusCode int) {
 		multiBar.Stop()
 	}
 	fmt.Println()
-	fmt.Println(text.FgYellow.Sprint("Added or changed objects:"), stats.AddedOrChanged)
+	fmt.Println(text.FgYellow.Sprint("Added or changed objects:"), st.AddedOrChanged)
 
 	if dryRun {
 		fmt.Println("Dry run successful. No changes were made.")
 		return 0
 	}
 
-	fmt.Print(text.FgYellow.Sprint("Commit ref:"), stats.CommitRef)
+	fmt.Print(text.FgYellow.Sprint("Commit ref:"), st.CommitRef)
 	fmt.Println()
 
 	if baseCommit == "" {
@@ -214,18 +239,18 @@ func runImport(cmd *cobra.Command, args []string) (statusCode int) {
 	}
 
 	if withMerge {
-		fmt.Printf("Merging import changes into lakefs://%s@%s/\n", repoName, repo.DefaultBranch)
-		msg := fmt.Sprintf(onboard.CommitMsgTemplate, stats.CommitRef)
-		commitLog, err := c.Merge(ctx, repoName, onboard.DefaultImportBranchName, repo.DefaultBranch, CommitterName, msg, nil)
+		fmt.Printf("Merging import changes into lakefs://%s/%s/\n", repoName, repo.DefaultBranch)
+		msg := fmt.Sprintf(onboard.CommitMsgTemplate, st.CommitRef)
+		commitLog, err := c.Merge(ctx, repoName, onboard.DefaultImportBranchName, repo.DefaultBranch, CommitterName, msg, nil, "")
 		if err != nil {
 			fmt.Printf("Merge failed: %s\n", err)
 			return 1
 		}
 		fmt.Println("Merge was completed successfully.")
-		fmt.Printf("To list imported objects, run:\n\t$ lakectl fs ls lakefs://%s@%s/\n", repoName, commitLog)
+		fmt.Printf("To list imported objects, run:\n\t$ lakectl fs ls lakefs://%s/%s/\n", repoName, commitLog)
 	} else {
-		fmt.Printf("To list imported objects, run:\n\t$ lakectl fs ls lakefs://%s@%s/\n", repoName, stats.CommitRef)
-		fmt.Printf("To merge the changes to your main branch, run:\n\t$ lakectl merge lakefs://%s@%s lakefs://%s@%s\n", repoName, stats.CommitRef, repoName, repo.DefaultBranch)
+		fmt.Printf("To list imported objects, run:\n\t$ lakectl fs ls lakefs://%s/%s/\n", repoName, st.CommitRef)
+		fmt.Printf("To merge the changes to your main branch, run:\n\t$ lakectl merge lakefs://%s/%s lakefs://%s/%s\n", repoName, st.CommitRef, repoName, repo.DefaultBranch)
 	}
 
 	return 0

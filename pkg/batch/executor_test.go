@@ -70,7 +70,7 @@ func testReadAfterWrite(t *testing.T) {
 	// 5. reader (r1) returns
 	// 6. reader (r2) returns
 	// 7. both readers (r1,r2) return with v1 as their response.
-	var db = &db{}
+	db := &db{}
 	db.Insert("v", "v0")
 
 	read1Done := make(chan bool)
@@ -220,7 +220,10 @@ func testBatchByKey(t *testing.T) {
 	// reader2 starts
 	go func(te *trackableExecuter) {
 		<-waitRead2 // ensure we start AFTER r1 started a new batch
-		exec.BatchFor("k2", 0, te)
+		_, err := exec.BatchFor("k2", 0, te)
+		if err != nil {
+			t.Errorf("BatchFor error: %s", err)
+		}
 		close(read2Done)
 	}(&te2)
 
@@ -229,8 +232,7 @@ func testBatchByKey(t *testing.T) {
 	r1Succeeded := te1.WasExecuted()
 	r2Succeeded := te2.WasExecuted()
 	if !(r1Succeeded && r2Succeeded) {
-		t.Error("both r1's and r2's exec functions should be executed but r1Succeeded=%t "+
-			"and r2Succeeded=%t", r1Succeeded, r2Succeeded)
+		t.Errorf("both r1's and r2's exec functions should be executed but r1Succeeded=%t and r2Succeeded=%t", r1Succeeded, r2Succeeded)
 	}
 }
 

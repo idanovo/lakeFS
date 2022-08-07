@@ -2,40 +2,54 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
-
-	"github.com/treeverse/lakefs/pkg/uri"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/treeverse/lakefs/pkg/api"
 	"github.com/treeverse/lakefs/pkg/api/helpers"
+	"github.com/treeverse/lakefs/pkg/uri"
 	"golang.org/x/term"
 )
 
-var isTerminal = true
-var noColorRequested = false
+var (
+	isTerminal       = true
+	noColorRequested = false
+	verboseMode      = false
+)
 
 // ErrInvalidValueInList is an error returned when a parameter of type list contains an empty string
 var ErrInvalidValueInList = errors.New("empty string in list")
 
+var accessKeyRegexp = regexp.MustCompile(`^AKIA[I|J][A-Z0-9]{14}Q$`)
+
+// const values used by lakectl commands
 const (
-	LakectlInteractive        = "LAKECTL_INTERACTIVE"
-	LakectlInteractiveDisable = "no"
-	DeathMessage              = "{{.Error|red}}\nError executing command.\n"
-	DeathMessageWithFields    = "{{.Message|red}}\n{{.Status}}\n"
+	PathDelimiter = "/"
 )
 
-const internalPageSize = 1000          // when retreiving all records, use this page size under the hood
-const defaultAmountArgumentValue = 100 // when no amount is specified, use this value for the argument
+const (
+	LakectlInteractive     = "LAKECTL_INTERACTIVE"
+	DeathMessage           = "{{.Error|red}}\nError executing command.\n"
+	DeathMessageWithFields = "{{.Message|red}}\n{{.Status}}\n"
+)
+
+const (
+	internalPageSize           = 1000 // when retreiving all records, use this page size under the hood
+	defaultAmountArgumentValue = 100  // when no amount is specified, use this value for the argument
+)
 
 const resourceListTemplate = `{{.Table | table -}}
 {{.Pagination | paginate }}
@@ -43,8 +57,15 @@ const resourceListTemplate = `{{.Table | table -}}
 
 //nolint:gochecknoinits
 func init() {
-	// disable colors if we're not attached to interactive TTY
-	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv(LakectlInteractive) == LakectlInteractiveDisable || noColorRequested {
+	// disable colors if we're not attached to interactive TTY.
+	// when environment variable is set we use it to control interactive mode
+	// otherwise we will try to detect based on the standard output
+	interactiveVal := os.Getenv(LakectlInteractive)
+	if interactiveVal != "" {
+		if interactive, err := strconv.ParseBool(interactiveVal); err == nil && !interactive {
+			DisableColors()
+		}
+	} else if !term.IsTerminal(int(os.Stdout.Fd())) {
 		DisableColors()
 	}
 }
@@ -152,6 +173,12 @@ func Write(tpl string, data interface{}) {
 	WriteTo(tpl, data, os.Stdout)
 }
 
+func WriteIfVerbose(tpl string, data interface{}) {
+	if verboseMode {
+		WriteTo(tpl, data, os.Stdout)
+	}
+}
+
 func Die(err string, code int) {
 	WriteTo(DeathMessage, struct{ Error string }{err}, os.Stderr)
 	os.Exit(code)
@@ -196,10 +223,32 @@ func RetrieveError(response interface{}, err error) error {
 	return helpers.ResponseAsError(response)
 }
 
-func DieOnResponseError(response interface{}, err error) {
+func dieOnResponseError(response interface{}, err error) {
 	retrievedErr := RetrieveError(response, err)
 	if retrievedErr != nil {
 		DieErr(retrievedErr)
+	}
+}
+
+func DieOnErrorOrUnexpectedStatusCode(response interface{}, err error, expectedStatusCode int) {
+	dieOnResponseError(response, err)
+	var statusCode int
+	if httpResponse, ok := response.(*http.Response); ok {
+		statusCode = httpResponse.StatusCode
+	} else {
+		r := reflect.Indirect(reflect.ValueOf(response))
+		f := r.FieldByName("HTTPResponse")
+		httpResponse, _ := f.Interface().(*http.Response)
+		if httpResponse != nil {
+			statusCode = httpResponse.StatusCode
+		}
+	}
+
+	if statusCode == 0 {
+		Die("could not get status code from response", 1)
+	}
+	if statusCode != expectedStatusCode {
+		DieFmt("got unexpected status code: %d, expected: %d", statusCode, expectedStatusCode)
 	}
 }
 
@@ -257,6 +306,17 @@ func MustParseRefURI(name, s string) *uri.URI {
 	return u
 }
 
+func MustParseBranchURI(name, s string) *uri.URI {
+	u, err := uri.ParseWithBaseURI(s, baseURI)
+	if err != nil {
+		DieFmt("Invalid '%s': %s", name, err)
+	}
+	if !u.IsBranch() {
+		DieFmt("Invalid %s: %s", name, uri.ErrInvalidBranchURI)
+	}
+	return u
+}
+
 func MustParsePathURI(name, s string) *uri.URI {
 	u, err := uri.ParseWithBaseURI(s, baseURI)
 	if err != nil {
@@ -266,4 +326,17 @@ func MustParsePathURI(name, s string) *uri.URI {
 		DieFmt("Invalid '%s': %s", name, uri.ErrInvalidPathURI)
 	}
 	return u
+}
+
+func IsValidAccessKeyID(accessKeyID string) bool {
+	return accessKeyRegexp.MatchString(accessKeyID)
+}
+
+func IsValidSecretAccessKey(secretAccessKey string) bool {
+	return IsBase64(secretAccessKey) && len(secretAccessKey) == 40
+}
+
+func IsBase64(s string) bool {
+	_, err := base64.StdEncoding.DecodeString(s)
+	return err == nil
 }

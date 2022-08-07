@@ -11,6 +11,7 @@ import (
 	"github.com/treeverse/lakefs/pkg/auth/crypt"
 	"github.com/treeverse/lakefs/pkg/auth/model"
 	"github.com/treeverse/lakefs/pkg/db"
+	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/stats"
 	"github.com/treeverse/lakefs/pkg/version"
@@ -23,7 +24,9 @@ var superuserCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := loadConfig()
 		ctx := cmd.Context()
-		dbPool := db.BuildDatabaseConnection(ctx, cfg.GetDatabaseParams())
+		dbParams := cfg.GetDatabaseParams()
+		dbPool := db.BuildDatabaseConnection(ctx, dbParams)
+
 		defer dbPool.Close()
 
 		userName, err := cmd.Flags().GetString("user-name")
@@ -42,13 +45,28 @@ var superuserCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		authService := auth.NewDBAuthService(
-			dbPool,
-			crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()),
-			cfg.GetAuthCacheConfig())
-		authMetadataManager := auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
-		metadataProvider := stats.BuildMetadataProvider(logging.Default(), cfg)
-		metadata := stats.NewMetadata(ctx, logging.Default(), cfg.GetBlockstoreType(), authMetadataManager, metadataProvider)
+		logger := logging.Default()
+		var (
+			authService         auth.Service
+			authMetadataManager auth.MetadataManager
+		)
+		if dbParams.KVEnabled {
+			kvparams := cfg.GetKVParams()
+			kvStore, err := kv.Open(ctx, dbParams.Type, kvparams)
+			if err != nil {
+				fmt.Printf("failed to open KV store: %s\n", err)
+				os.Exit(1)
+			}
+			storeMessage := &kv.StoreMessage{Store: kvStore}
+			authService = auth.NewKVAuthService(storeMessage, crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()), nil, cfg.GetAuthCacheConfig(), logger.WithField("service", "auth_service"))
+			authMetadataManager = auth.NewKVMetadataManager(version.Version, cfg.GetFixedInstallationID(), cfg.GetDatabaseParams().Type, kvStore)
+		} else {
+			authService = auth.NewDBAuthService(dbPool, crypt.NewSecretStore(cfg.GetAuthEncryptionSecret()), nil, cfg.GetAuthCacheConfig(), logger.WithField("service", "auth_service"))
+			authMetadataManager = auth.NewDBMetadataManager(version.Version, cfg.GetFixedInstallationID(), dbPool)
+		}
+
+		metadataProvider := stats.BuildMetadataProvider(logger, cfg)
+		metadata := stats.NewMetadata(ctx, logger, cfg.GetBlockstoreType(), authMetadataManager, metadataProvider)
 		credentials, err := auth.AddAdminUser(ctx, authService, &model.SuperuserConfiguration{
 			User: model.User{
 				CreatedAt: time.Now(),
@@ -64,7 +82,9 @@ var superuserCmd = &cobra.Command{
 
 		ctx, cancelFn := context.WithCancel(ctx)
 		stats := stats.NewBufferedCollector(metadata.InstallationID, cfg)
-		go stats.Run(ctx)
+		stats.Run(ctx)
+		defer stats.Close()
+
 		stats.CollectMetadata(metadata)
 		stats.CollectEvent("global", "superuser")
 
@@ -72,7 +92,7 @@ var superuserCmd = &cobra.Command{
 			credentials.AccessKeyID, credentials.SecretAccessKey)
 
 		cancelFn()
-		<-stats.Done()
+
 	},
 }
 

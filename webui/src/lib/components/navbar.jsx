@@ -9,7 +9,6 @@ import {Link} from "./nav";
 import {useAPI} from "../hooks/api";
 
 const NavUserInfo = () => {
-    const router = useRouter();
     const { user, loading, error } = useUser();
     const { response: versionResponse, loading: versionLoading, error: versionError } = useAPI(() => {
         return config.getLakeFSVersion()
@@ -19,23 +18,10 @@ const NavUserInfo = () => {
     return (
         <Navbar.Collapse className="justify-content-end">
             <NavDropdown title={user.friendly_name || user.id} className="navbar-username" alignRight>
-                <NavDropdown.Header>
-                    User: <code>{user.accessKeyId}</code>
-                </NavDropdown.Header>
-
-                <NavDropdown.Divider/>
-
-                <NavDropdown.Item
-                    href="/auth/credentials"
-                    onSelect={()=> router.push('/auth/credentials')}>
-                        Manage My Credentials
-                </NavDropdown.Item>
-
                 <NavDropdown.Item
                     onSelect={()=> {
-                        auth.logout().then(() => {
-                            router.push('/auth/login')
-                        })
+                        auth.clearCurrentUser();
+                        window.location = '/logout';
                     }}>
                     Logout
                 </NavDropdown.Item>
@@ -63,7 +49,16 @@ const TopNavLink = ({ href, children }) => {
     );
 };
 
-const TopNav = () => {
+const TopNav = ({logged = true}) => {
+    if (!logged) {
+        return (
+            <Navbar variant="dark" bg="dark" expand="md">
+                <Link component={Navbar.Brand} href="/">
+                    <img src="/logo.png" alt="lakeFS" className="logo"/>
+                </Link>
+            </Navbar>
+        );
+    }
     return (
         <Navbar variant="dark" bg="dark" expand="md">
             <Link component={Navbar.Brand} href="/">

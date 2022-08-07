@@ -2,10 +2,15 @@ package actions
 
 import (
 	"context"
+	"fmt"
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/treeverse/lakefs/pkg/db"
 )
+
+const defaultFetchSize = 1024
+
+var psql = sq.StatementBuilder.PlaceholderFormat(sq.Dollar)
 
 type DBRunResultIterator struct {
 	db           db.Database
@@ -21,7 +26,11 @@ type DBRunResultIterator struct {
 	commitID     string
 }
 
-func NewDBRunResultIterator(ctx context.Context, db db.Database, fetchSize int, repositoryID string, branchID, commitID string, after string) *DBRunResultIterator {
+func NewDBRunResultIterator(ctx context.Context, db db.Database, fetchSize int, repositoryID, branchID, commitID string, after string) (*DBRunResultIterator, error) {
+	if branchID != "" && commitID != "" {
+		return nil, fmt.Errorf("can't use both branchID and CommitID: %w", ErrParamConflict)
+	}
+
 	return &DBRunResultIterator{
 		db:           db,
 		ctx:          ctx,
@@ -31,7 +40,7 @@ func NewDBRunResultIterator(ctx context.Context, db db.Database, fetchSize int, 
 		commitID:     commitID,
 		fetchSize:    fetchSize,
 		buf:          make([]*RunResult, 0, fetchSize),
-	}
+	}, nil
 }
 
 func (it *DBRunResultIterator) Next() bool {

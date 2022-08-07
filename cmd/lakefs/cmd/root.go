@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	homedir "github.com/mitchellh/go-homedir"
+	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/treeverse/lakefs/pkg/config"
@@ -102,12 +102,16 @@ func initConfig() {
 	} else {
 		logger.Info("Config loaded")
 	}
+
 	err = cfg.Validate()
 	if err != nil {
 		logger.WithError(err).Fatal("Invalid config")
 	}
 
 	logger.WithFields(cfg.ToLoggerFields()).Info("Config")
+	if cfg.GetDatabaseParams().KVEnabled {
+		logger.Warn("USING KV EXPERIMENTAL FLAG!!! USE AT YOUR OWN RISK!!!")
+	}
 }
 
 // getHomeDir find and return the home directory

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -42,12 +41,12 @@ var fsStatCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		pathURI := MustParsePathURI("path", args[0])
 		client := getClient()
-		res, err := client.StatObjectWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, &api.StatObjectParams{
+		resp, err := client.StatObjectWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, &api.StatObjectParams{
 			Path: *pathURI.Path,
 		})
-		DieOnResponseError(res, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
 
-		stat := res.JSON200
+		stat := resp.JSON200
 		Write(fsStatTemplate, stat)
 	},
 }
@@ -68,9 +67,8 @@ var fsListCmd = &cobra.Command{
 		prefix := *pathURI.Path
 
 		// prefix we need to trim in ls output (non recursive)
-		const delimiter = "/"
 		var trimPrefix string
-		if idx := strings.LastIndex(prefix, delimiter); idx != -1 {
+		if idx := strings.LastIndex(prefix, PathDelimiter); idx != -1 {
 			trimPrefix = prefix[:idx+1]
 		}
 		// delimiter used for listing
@@ -78,7 +76,7 @@ var fsListCmd = &cobra.Command{
 		if recursive {
 			paramsDelimiter = ""
 		} else {
-			paramsDelimiter = delimiter
+			paramsDelimiter = PathDelimiter
 		}
 		var from string
 		for {
@@ -89,7 +87,7 @@ var fsListCmd = &cobra.Command{
 				Delimiter: &paramsDelimiter,
 			}
 			resp, err := client.ListObjectsWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, params)
-			DieOnResponseError(resp, err)
+			DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
 
 			results := resp.JSON200.Results
 			// trim prefix if non recursive
@@ -151,14 +149,14 @@ func upload(ctx context.Context, client api.ClientWithResponsesInterface, source
 	defer func() {
 		_ = fp.Close()
 	}()
-	filePath := api.StringValue(destURI.Path)
+	objectPath := api.StringValue(destURI.Path)
 	if direct {
-		return helpers.ClientUpload(ctx, client, destURI.Repository, destURI.Ref, filePath, nil, contentType, fp)
+		return helpers.ClientUpload(ctx, client, destURI.Repository, destURI.Ref, objectPath, nil, contentType, fp)
 	}
-	return uploadObject(ctx, client, destURI.Repository, destURI.Ref, filePath, contentType, fp)
+	return uploadObject(ctx, client, destURI.Repository, destURI.Ref, objectPath, contentType, fp)
 }
 
-func uploadObject(ctx context.Context, client api.ClientWithResponsesInterface, repoID, branchID, filePath, contentType string, fp io.Reader) (*api.ObjectStats, error) {
+func uploadObject(ctx context.Context, client api.ClientWithResponsesInterface, repoID, branchID, objectPath, contentType string, fp io.Reader) (*api.ObjectStats, error) {
 	pr, pw := io.Pipe()
 	mpw := multipart.NewWriter(pw)
 	mpContentType := mpw.FormDataContentType()
@@ -166,7 +164,7 @@ func uploadObject(ctx context.Context, client api.ClientWithResponsesInterface, 
 		defer func() {
 			_ = pw.Close()
 		}()
-		filename := path.Base(filePath)
+		filename := filepath.Base(objectPath)
 		const fieldName = "content"
 		var err error
 		var cw io.Writer
@@ -192,7 +190,7 @@ func uploadObject(ctx context.Context, client api.ClientWithResponsesInterface, 
 	}()
 
 	resp, err := client.UploadObjectWithBodyWithResponse(ctx, repoID, branchID, &api.UploadObjectParams{
-		Path: filePath,
+		Path: objectPath,
 	}, mpContentType, pr)
 	if err != nil {
 		return nil, err
@@ -236,7 +234,7 @@ var fsUploadCmd = &cobra.Command{
 			}
 			relPath := strings.TrimPrefix(path, source)
 			uri := *pathURI
-			p := filepath.Join(*uri.Path, relPath)
+			p := filepath.ToSlash(filepath.Join(*uri.Path, relPath))
 			uri.Path = &p
 			stat, err := upload(cmd.Context(), client, path, &uri, contentType, direct)
 			if err != nil {
@@ -293,7 +291,7 @@ var fsStageCmd = &cobra.Command{
 		resp, err := client.StageObjectWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, &api.StageObjectParams{
 			Path: *pathURI.Path,
 		}, api.StageObjectJSONRequestBody(obj))
-		DieOnResponseError(resp, err)
+		DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusCreated)
 
 		Write(fsStatTemplate, resp.JSON201)
 	},
@@ -366,7 +364,7 @@ var fsRmCmd = &cobra.Command{
 				Delimiter: &paramsDelimiter,
 			}
 			resp, err := client.ListObjectsWithResponse(cmd.Context(), pathURI.Repository, pathURI.Ref, params)
-			DieOnResponseError(resp, err)
+			DieOnErrorOrUnexpectedStatusCode(resp, err, http.StatusOK)
 
 			results := resp.JSON200.Results
 			for i := range results {
@@ -400,7 +398,7 @@ var fsCmd = &cobra.Command{
 	Short: "View and manipulate objects",
 }
 
-//nolint:gochecknoinits
+//nolint:gochecknoinits,gomnd
 func init() {
 	rootCmd.AddCommand(fsCmd)
 	fsCmd.AddCommand(fsStatCmd)

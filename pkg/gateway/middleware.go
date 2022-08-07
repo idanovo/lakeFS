@@ -16,13 +16,12 @@ import (
 	"github.com/treeverse/lakefs/pkg/gateway/operations"
 	"github.com/treeverse/lakefs/pkg/gateway/path"
 	"github.com/treeverse/lakefs/pkg/gateway/sig"
-	"github.com/treeverse/lakefs/pkg/gateway/simulator"
 	"github.com/treeverse/lakefs/pkg/httputil"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/permissions"
 )
 
-func AuthenticationHandler(authService simulator.GatewayAuthService, next http.Handler) http.Handler {
+func AuthenticationHandler(authService auth.GatewayService, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		o := ctx.Value(ContextKeyOperation).(*operations.Operation)
@@ -55,7 +54,8 @@ func AuthenticationHandler(authService simulator.GatewayAuthService, next http.H
 			_ = o.EncodeError(w, req, getAPIErrOrDefault(err, gatewayerrors.ErrAccessDenied))
 			return
 		}
-		user, err := authService.GetUserByID(ctx, creds.UserID)
+
+		user, err := authService.GetUser(ctx, creds.Username)
 		if err != nil {
 			logger.WithError(err).Warn("could not get user for credentials key")
 			_ = o.EncodeError(w, req, gatewayerrors.ErrAccessDenied.ToAPIErr())
@@ -132,7 +132,7 @@ func DurationHandler(next http.Handler) http.Handler {
 	})
 }
 
-func EnrichWithRepositoryOrFallback(c catalog.Interface, authService simulator.GatewayAuthService, fallbackProxy http.Handler, next http.Handler) http.Handler {
+func EnrichWithRepositoryOrFallback(c catalog.Interface, authService auth.GatewayService, fallbackProxy http.Handler, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		repoID := ctx.Value(ContextKeyRepositoryID).(string)
@@ -231,7 +231,7 @@ func ParseRequestParts(host string, urlPath string, bareDomains []string) Reques
 	// 3. none of the above, path based
 	if memberFold(httputil.HostOnly(host), ourHosts) {
 		// path style: extract repo from first part
-		p = strings.SplitN(urlPath, path.Separator, 3)
+		p = strings.SplitN(urlPath, path.Separator, 3) //nolint: gomnd
 		parts.Repository = p[0]
 		if len(p) >= 1 {
 			p = p[1:]
@@ -248,13 +248,13 @@ func ParseRequestParts(host string, urlPath string, bareDomains []string) Reques
 			}
 		}
 		if parts.MatchedHost {
-			p = strings.SplitN(urlPath, path.Separator, 2)
+			p = strings.SplitN(urlPath, path.Separator, 2) //nolint: gomnd
 		}
 	}
 
 	if !parts.MatchedHost {
 		// assume path based for domains we don't explicitly know
-		p = strings.SplitN(urlPath, path.Separator, 3)
+		p = strings.SplitN(urlPath, path.Separator, 3) //nolint: gomnd
 		parts.Repository = p[0]
 		if len(p) >= 1 {
 			p = p[1:]

@@ -1,0 +1,17 @@
+database:
+  connection_string: "postgres://lakefs:lakefs@localhost:5433/postgres?sslmode=disable"
+#  kv_enabled: "true"
+#  type: "postgres"
+
+auth:
+  encrypt:
+    secret_key: "some random value that should be replaced for production environments"
+
+blockstore:
+  type: local
+  local:
+    path: /tmp/lakefs
+
+logging:
+  format: text
+  level: trace

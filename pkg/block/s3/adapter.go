@@ -28,8 +28,6 @@ const (
 
 	// Chunks smaller than that are only allowed for the last chunk upload
 	minChunkSize = 8 * 1024
-
-	ExpireObjectS3Tag = "lakefs_expire_object"
 )
 
 var (
@@ -229,7 +227,7 @@ func (a *Adapter) streamToS3(ctx context.Context, sdkRequest *request.Request, s
 	if err != nil {
 		log.WithError(err).
 			WithField("url", sdkRequest.HTTPRequest.URL.String()).
-			Error("error making request request")
+			Error("error making request")
 		return nil, err
 	}
 

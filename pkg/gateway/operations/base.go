@@ -8,11 +8,11 @@ import (
 	"net/http"
 
 	"github.com/treeverse/lakefs/pkg/auth"
+	"github.com/treeverse/lakefs/pkg/auth/keys"
 	"github.com/treeverse/lakefs/pkg/block"
 	"github.com/treeverse/lakefs/pkg/catalog"
 	"github.com/treeverse/lakefs/pkg/gateway/errors"
 	"github.com/treeverse/lakefs/pkg/gateway/multiparts"
-	"github.com/treeverse/lakefs/pkg/gateway/simulator"
 	"github.com/treeverse/lakefs/pkg/httputil"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/permissions"
@@ -47,7 +47,7 @@ type Operation struct {
 	Catalog           catalog.Interface
 	MultipartsTracker multiparts.Tracker
 	BlockStore        block.Adapter
-	Auth              simulator.GatewayAuthService
+	Auth              auth.GatewayService
 	Incr              ActionIncr
 	MatchedHost       bool
 }
@@ -150,7 +150,7 @@ func (o *Operation) EncodeError(w http.ResponseWriter, req *http.Request, e erro
 
 func generateHostID() string {
 	const generatedHostIDLength = 8
-	return auth.HexStringGenerator(generatedHostIDLength)
+	return keys.HexStringGenerator(generatedHostIDLength)
 }
 
 type AuthorizedOperation struct {

@@ -55,7 +55,8 @@ services:
     extra_hosts:
       - "s3.docker.lakefs.io:10.5.0.55"
       - "example.s3.docker.lakefs.io:10.5.0.55"
-      - "gateway-test.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark2.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark3.s3.docker.lakefs.io:10.5.0.55"
       - "thick-client-test.s3.docker.lakefs.io:10.5.0.55"
   spark-worker:
     image: docker.io/bitnami/spark:${SPARK_TAG:-3}
@@ -64,8 +65,8 @@ services:
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark:7077
-      - SPARK_WORKER_MEMORY=1G
-      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=4G
+      - SPARK_WORKER_CORES=8
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
@@ -75,13 +76,12 @@ services:
       - AWS_REGION
     env_file:
       - tester.env
-    deploy:
-      replicas: 3
     extra_hosts:
       - "s3.docker.lakefs.io:10.5.0.55"
       - "docker.lakefs.io:10.5.0.55"
       - "example.s3.docker.lakefs.io:10.5.0.55"
-      - "gateway-test.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark2.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark3.s3.docker.lakefs.io:10.5.0.55"
       - "thick-client-test.s3.docker.lakefs.io:10.5.0.55"
   spark-submit:
     image: docker.io/bitnami/spark:${SPARK_TAG:-3}
@@ -102,11 +102,14 @@ services:
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_REGION
+      - LAKEFS_BLOCKSTORE_AZURE_STORAGE_ACCOUNT
+      - LAKEFS_BLOCKSTORE_AZURE_STORAGE_ACCESS_KEY
     extra_hosts:
       - "s3.docker.lakefs.io:10.5.0.55"
       - "docker.lakefs.io:10.5.0.55"
       - "example.s3.docker.lakefs.io:10.5.0.55"
-      - "gateway-test.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark2.s3.docker.lakefs.io:10.5.0.55"
+      - "gateway-test-spark3.s3.docker.lakefs.io:10.5.0.55"
       - "thick-client-test.s3.docker.lakefs.io:10.5.0.55"
 
 networks:

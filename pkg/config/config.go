@@ -15,11 +15,14 @@ import (
 	"github.com/mitchellh/go-homedir"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
+	apiparams "github.com/treeverse/lakefs/pkg/api/params"
+	"github.com/treeverse/lakefs/pkg/auth/email"
 	authparams "github.com/treeverse/lakefs/pkg/auth/params"
 	"github.com/treeverse/lakefs/pkg/block"
 	blockparams "github.com/treeverse/lakefs/pkg/block/params"
 	dbparams "github.com/treeverse/lakefs/pkg/db/params"
 	"github.com/treeverse/lakefs/pkg/graveler/committed"
+	kvparams "github.com/treeverse/lakefs/pkg/kv/params"
 	"github.com/treeverse/lakefs/pkg/logging"
 	pyramidparams "github.com/treeverse/lakefs/pkg/pyramid/params"
 )
@@ -49,6 +52,9 @@ const (
 	DefaultAuthCacheTTL     = 20 * time.Second
 	DefaultAuthCacheJitter  = 3 * time.Second
 
+	DefaultAuthOIDCInitialGroupsClaimName = "initial_groups"
+	DefaultAuthLogoutRedirectURL          = "/auth/login"
+
 	DefaultListenAddr          = "0.0.0.0:8000"
 	DefaultS3GatewayDomainName = "s3.local.lakefs.io"
 	DefaultS3GatewayRegion     = "us-east-1"
@@ -62,6 +68,15 @@ const (
 
 	DefaultAzureTryTimeout = 10 * time.Minute
 	DefaultAzureAuthMethod = "access-key"
+
+	DefaultEmailLimitEveryDuration = time.Minute
+	DefaultEmailBurst              = 10
+	DefaultLakefsEmailBaseURL      = "http://localhost:8000"
+
+	DefaultDynamoDBTableName = "kvstore"
+	// TBD: Which values to use for DynamoDB tables?
+	DefaultDynamoDBReadCapacityUnits  = 1000
+	DefaultDynamoDBWriteCapacityUnits = 1000
 )
 
 var (
@@ -108,9 +123,12 @@ func NewConfig() (*Config, error) {
 const (
 	ListenAddressKey = "listen_address"
 
-	LoggingFormatKey = "logging.format"
-	LoggingLevelKey  = "logging.level"
-	LoggingOutputKey = "logging.output"
+	LoggingFormatKey        = "logging.format"
+	LoggingLevelKey         = "logging.level"
+	LoggingOutputKey        = "logging.output"
+	LoggingFileMaxSizeMBKey = "logging.file_max_size_mb"
+	LoggingFilesKeepKey     = "logging.files_keep"
+	LoggingAuditLogLevel    = "logging.audit_log_level"
 
 	ActionsEnabledKey = "actions.enabled"
 
@@ -119,8 +137,12 @@ const (
 	AuthCacheTTLKey     = "auth.cache.ttl"
 	AuthCacheJitterKey  = "auth.cache.jitter"
 
+	AuthOIDCInitialGroupsClaimName = "auth.oidc.initial_groups_claim_name"
+	AuthLogoutRedirectURL          = "auth.logout_redirect_url"
+
 	BlockstoreTypeKey                    = "blockstore.type"
 	BlockstoreLocalPathKey               = "blockstore.local.path"
+	BlockstoreDefaultNamespacePrefixKey  = "blockstore.default_namespace_prefix"
 	BlockstoreS3RegionKey                = "blockstore.s3.region"
 	BlockstoreS3StreamingChunkSizeKey    = "blockstore.s3.streaming_chunk_size"
 	BlockstoreS3StreamingChunkTimeoutKey = "blockstore.s3.streaming_chunk_timeout"
@@ -157,6 +179,14 @@ const (
 
 	SecurityAuditCheckURLKey     = "security.audit_check_url"
 	DefaultSecurityAuditCheckURL = "https://audit.lakefs.io/audit"
+
+	EmailLimitEveryDurationKey = "email.limit_every_duration"
+	EmailBurstKey              = "email.burst"
+	LakefsEmailBaseURLKey      = "email.lakefs_base_url"
+
+	DynamoDBTableNameKey          = "database.beta_dynamodb.table_name"
+	DynamoDBReadCapacityUnitsKey  = "database.beta_dynamodb.read_capacity_units"
+	DynamoDBWriteCapacityUnitsKey = "database.beta_dynamodb.write_capacity_units"
 )
 
 func setDefaults() {
@@ -165,6 +195,8 @@ func setDefaults() {
 	viper.SetDefault(LoggingFormatKey, DefaultLoggingFormat)
 	viper.SetDefault(LoggingLevelKey, DefaultLoggingLevel)
 	viper.SetDefault(LoggingOutputKey, DefaultLoggingOutput)
+	viper.SetDefault(LoggingFilesKeepKey, DefaultLoggingFilesKeepKey)
+	viper.SetDefault(LoggingAuditLogLevel, DefaultAuditLogLevel)
 
 	viper.SetDefault(ActionsEnabledKey, DefaultActionsEnabled)
 
@@ -172,6 +204,9 @@ func setDefaults() {
 	viper.SetDefault(AuthCacheSizeKey, DefaultAuthCacheSize)
 	viper.SetDefault(AuthCacheTTLKey, DefaultAuthCacheTTL)
 	viper.SetDefault(AuthCacheJitterKey, DefaultAuthCacheJitter)
+
+	viper.SetDefault(AuthOIDCInitialGroupsClaimName, DefaultAuthOIDCInitialGroupsClaimName)
+	viper.SetDefault(AuthLogoutRedirectURL, DefaultAuthLogoutRedirectURL)
 
 	viper.SetDefault(BlockstoreLocalPathKey, DefaultBlockStoreLocalPath)
 	viper.SetDefault(BlockstoreS3RegionKey, DefaultBlockStoreS3Region)
@@ -207,6 +242,13 @@ func setDefaults() {
 
 	viper.SetDefault(SecurityAuditCheckIntervalKey, DefaultSecurityAuditCheckInterval)
 	viper.SetDefault(SecurityAuditCheckURLKey, DefaultSecurityAuditCheckURL)
+	viper.SetDefault(EmailLimitEveryDurationKey, DefaultEmailLimitEveryDuration)
+	viper.SetDefault(EmailBurstKey, DefaultEmailBurst)
+	viper.SetDefault(LakefsEmailBaseURLKey, DefaultLakefsEmailBaseURL)
+
+	viper.SetDefault(DynamoDBTableNameKey, DefaultDynamoDBTableName)
+	viper.SetDefault(DynamoDBReadCapacityUnitsKey, DefaultDynamoDBReadCapacityUnits)
+	viper.SetDefault(DynamoDBWriteCapacityUnitsKey, DefaultDynamoDBWriteCapacityUnits)
 }
 
 func reverse(s string) string {
@@ -248,10 +290,31 @@ func (c *Config) Validate() error {
 
 func (c *Config) GetDatabaseParams() dbparams.Database {
 	return dbparams.Database{
-		ConnectionString:      c.values.Database.ConnectionString.String(),
+		ConnectionString:      c.values.Database.ConnectionString.SecureValue(),
 		MaxOpenConnections:    c.values.Database.MaxOpenConnections,
 		MaxIdleConnections:    c.values.Database.MaxIdleConnections,
 		ConnectionMaxLifetime: c.values.Database.ConnectionMaxLifetime,
+		Type:                  c.values.Database.Type,
+		KVEnabled:             c.values.Database.KVEnabled,
+		DropTables:            c.values.Database.DropTables,
+	}
+}
+
+func (c *Config) GetKVParams() kvparams.KV {
+	return kvparams.KV{
+		Postgres: &kvparams.Postgres{
+			ConnectionString: c.values.Database.ConnectionString.SecureValue(),
+		},
+		DynamoDB: &kvparams.DynamoDB{
+			TableName:          c.values.Database.BetaDynamoDB.TableName,
+			ReadCapacityUnits:  c.values.Database.BetaDynamoDB.ReadCapacityUnits,
+			WriteCapacityUnits: c.values.Database.BetaDynamoDB.WriteCapacityUnits,
+			ScanLimit:          c.values.Database.BetaDynamoDB.ScanLimit,
+			Endpoint:           c.values.Database.BetaDynamoDB.Endpoint,
+			AwsRegion:          c.values.Database.BetaDynamoDB.AwsRegion,
+			AwsAccessKeyID:     c.values.Database.BetaDynamoDB.AwsAccessKeyID.String(),
+			AwsSecretAccessKey: c.values.Database.BetaDynamoDB.AwsSecretAccessKey.String(),
+		},
 	}
 }
 
@@ -282,9 +345,9 @@ func (c *Config) GetAwsConfig() *aws.Config {
 			secretAccessKey = c.values.Blockstore.S3.Credentials.AccessSecretKey
 		}
 		cfg.Credentials = credentials.NewStaticCredentials(
-			c.values.Blockstore.S3.Credentials.AccessKeyID.String(),
-			secretAccessKey.String(),
-			c.values.Blockstore.S3.Credentials.SessionToken.String(),
+			c.values.Blockstore.S3.Credentials.AccessKeyID.SecureValue(),
+			secretAccessKey.SecureValue(),
+			c.values.Blockstore.S3.Credentials.SessionToken.SecureValue(),
 		)
 	}
 
@@ -302,6 +365,10 @@ func (c *Config) GetAwsConfig() *aws.Config {
 
 func (c *Config) GetBlockstoreType() string {
 	return c.values.Blockstore.Type
+}
+
+func (c *Config) GetBlockstoreDefaultNamespacePrefix() string {
+	return c.values.Blockstore.DefaultNamespacePrefix
 }
 
 func (c *Config) GetBlockAdapterS3Params() (blockparams.S3, error) {
@@ -390,6 +457,21 @@ func (c *Config) GetStatsFlushInterval() time.Duration {
 	return c.values.Stats.FlushInterval
 }
 
+func (c *Config) GetEmailParams() (email.Params, error) {
+	return email.Params{
+		SMTPHost:           c.values.Email.SMTPHost,
+		SMTPPort:           c.values.Email.SMTPPort,
+		UseSSL:             c.values.Email.UseSSL,
+		Username:           c.values.Email.Username,
+		Password:           c.values.Email.Password,
+		LocalName:          c.values.Email.LocalName,
+		Sender:             c.values.Email.Sender,
+		LimitEveryDuration: c.values.Email.LimitEveryDuration,
+		Burst:              c.values.Email.Burst,
+		LakefsBaseURL:      c.values.Email.LakefsBaseURL,
+	}, nil
+}
+
 const floatSumTolerance = 1e-6
 
 // GetCommittedTierFSParams returns parameters for building a tierFS.  Caller must separately
@@ -449,10 +531,49 @@ func (c *Config) GetLoggingTraceRequestHeaders() bool {
 	return c.values.Logging.TraceRequestHeaders
 }
 
+func (c *Config) GetAuditLogLevel() string {
+	return c.values.Logging.AuditLogLevel
+}
+
 func (c *Config) GetSecurityAuditCheckInterval() time.Duration {
 	return c.values.Security.AuditCheckInterval
 }
 
 func (c *Config) GetSecurityAuditCheckURL() string {
 	return c.values.Security.AuditCheckURL
+}
+
+func (c *Config) GetAuthAPIEndpoint() string {
+	return c.values.Auth.API.Endpoint
+}
+
+func (c *Config) IsAuthTypeAPI() bool {
+	return c.values.Auth.API.Endpoint != ""
+}
+
+func (c *Config) GetAuthAPIToken() string {
+	return c.values.Auth.API.Token
+}
+
+func (c *Config) GetAuthAPISupportsInvites() bool {
+	return c.values.Auth.API.SupportsInvites
+}
+
+func (c *Config) GetUISnippets() []apiparams.CodeSnippet {
+	snippets := make([]apiparams.CodeSnippet, 0, len(c.values.UI.Snippets))
+	for _, item := range c.values.UI.Snippets {
+		snippets = append(snippets, apiparams.CodeSnippet{
+			ID:   item.ID,
+			Code: item.Code,
+		})
+	}
+	return snippets
+}
+
+func (c *Config) GetAuthOIDCConfiguration() OIDC {
+	return c.values.Auth.OIDC
+}
+
+func (c *Config) GetAuthLogoutRedirectURL() string {
+	return c.values.Auth.LogoutRedirectURL
 }

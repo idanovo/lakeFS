@@ -26,6 +26,8 @@ import (
 	"github.com/treeverse/lakefs/pkg/graveler/sstable"
 	"github.com/treeverse/lakefs/pkg/graveler/staging"
 	"github.com/treeverse/lakefs/pkg/ident"
+	"github.com/treeverse/lakefs/pkg/ingest/store"
+	"github.com/treeverse/lakefs/pkg/kv"
 	"github.com/treeverse/lakefs/pkg/logging"
 	"github.com/treeverse/lakefs/pkg/pyramid"
 	"github.com/treeverse/lakefs/pkg/pyramid/params"
@@ -101,16 +103,19 @@ const (
 )
 
 type Config struct {
-	Config *config.Config
-	DB     db.Database
-	LockDB db.Database
+	Config        *config.Config
+	DB            db.Database
+	LockDB        db.Database
+	KVStore       *kv.StoreMessage
+	WalkerFactory WalkerFactory
 }
 
 type Catalog struct {
-	BlockAdapter block.Adapter
-	Store        Store
-	log          logging.Logger
-	managers     []io.Closer
+	BlockAdapter  block.Adapter
+	Store         Store
+	log           logging.Logger
+	walkerFactory WalkerFactory
+	managers      []io.Closer
 }
 
 const (
@@ -143,6 +148,10 @@ func New(ctx context.Context, cfg Config) (*Catalog, error) {
 		cancelFn()
 		return nil, fmt.Errorf("build block adapter: %w", err)
 	}
+	if cfg.WalkerFactory == nil {
+		cfg.WalkerFactory = store.NewFactory(cfg.Config)
+	}
+
 	tierFSParams, err := cfg.Config.GetCommittedTierFSParams(adapter)
 	if err != nil {
 		cancelFn()
@@ -173,8 +182,10 @@ func New(ctx context.Context, cfg Config) (*Catalog, error) {
 
 	sstableManager := sstable.NewPebbleSSTableRangeManager(pebbleSSTableCache, rangeFS, hashAlg)
 	sstableMetaManager := sstable.NewPebbleSSTableRangeManager(pebbleSSTableCache, metaRangeFS, hashAlg)
+
+	committedParams := *cfg.Config.GetCommittedParams()
 	sstableMetaRangeManager, err := committed.NewMetaRangeManager(
-		*cfg.Config.GetCommittedParams(),
+		committedParams,
 		// TODO(ariels): Use separate range managers for metaranges and ranges
 		sstableMetaManager,
 		sstableManager,
@@ -183,24 +194,40 @@ func New(ctx context.Context, cfg Config) (*Catalog, error) {
 		cancelFn()
 		return nil, fmt.Errorf("create SSTable-based metarange manager: %w", err)
 	}
-	committedManager := committed.NewCommittedManager(sstableMetaRangeManager)
+	committedManager := committed.NewCommittedManager(sstableMetaRangeManager, sstableManager, committedParams)
 
 	executor := batch.NewExecutor(logging.Default())
 	go executor.Run(ctx)
 
-	refManager := ref.NewPGRefManager(executor, cfg.DB, ident.NewHexAddressProvider())
-	branchLocker := ref.NewBranchLocker(cfg.LockDB)
-	gcManager := retention.NewGarbageCollectionManager(cfg.DB, tierFSParams.Adapter, refManager, cfg.Config.GetCommittedBlockStoragePrefix())
-	stagingManager := staging.NewManager(cfg.DB)
-	settingManager := settings.NewManager(refManager, branchLocker, adapter, cfg.Config.GetCommittedBlockStoragePrefix())
-	protectedBranchesManager := branch.NewProtectionManager(settingManager)
-	store := graveler.NewGraveler(branchLocker, committedManager, stagingManager, refManager, gcManager, protectedBranchesManager)
+	var gStore Store
+	var stagingManager graveler.StagingManager
+	var refManager graveler.RefManager
+	var gcManager graveler.GarbageCollectionManager
+	var protectedBranchesManager graveler.ProtectedBranchesManager
+	branchLocker := ref.NewBranchLocker(cfg.LockDB) // TODO (niro): Will not be needed in KV implementation
+
+	if cfg.Config.GetDatabaseParams().KVEnabled { // TODO (niro): Each module should be replaced by an appropriate KV implementation
+		refManager = ref.NewKVRefManager(executor, *cfg.KVStore, ident.NewHexAddressProvider())
+		gcManager = retention.NewGarbageCollectionManager(tierFSParams.Adapter, refManager, cfg.Config.GetCommittedBlockStoragePrefix())
+		settingManager := settings.NewManager(refManager, branchLocker, adapter, cfg.Config.GetCommittedBlockStoragePrefix())
+		protectedBranchesManager = branch.NewProtectionManager(settingManager)
+		stagingManager = staging.NewManager(*cfg.KVStore)
+		gStore = graveler.NewKVGraveler(committedManager, stagingManager, refManager, gcManager, protectedBranchesManager)
+	} else {
+		refManager = ref.NewPGRefManager(executor, cfg.DB, ident.NewHexAddressProvider())
+		gcManager = retention.NewGarbageCollectionManager(tierFSParams.Adapter, refManager, cfg.Config.GetCommittedBlockStoragePrefix())
+		settingManager := settings.NewManager(refManager, branchLocker, adapter, cfg.Config.GetCommittedBlockStoragePrefix())
+		protectedBranchesManager = branch.NewProtectionManager(settingManager)
+		stagingManager = staging.NewDBManager(cfg.DB)
+		gStore = graveler.NewDBGraveler(branchLocker, committedManager, stagingManager, refManager, gcManager, protectedBranchesManager)
+	}
 
 	return &Catalog{
-		BlockAdapter: tierFSParams.Adapter,
-		Store:        store,
-		log:          logging.Default().WithField("service_name", "entry_catalog"),
-		managers:     []io.Closer{sstableManager, sstableMetaManager, &ctxCloser{cancelFn}},
+		BlockAdapter:  tierFSParams.Adapter,
+		Store:         gStore,
+		log:           logging.Default().WithField("service_name", "entry_catalog"),
+		walkerFactory: cfg.WalkerFactory,
+		managers:      []io.Closer{sstableManager, sstableMetaManager, &ctxCloser{cancelFn}},
 	}, nil
 }
 
@@ -375,6 +402,9 @@ func (c *Catalog) CreateBranch(ctx context.Context, repository string, branch st
 		{Name: "branch", Value: branchID, Fn: graveler.ValidateBranchID},
 		{Name: "ref", Value: sourceRef, Fn: graveler.ValidateRef},
 	}); err != nil {
+		if errors.Is(err, graveler.ErrInvalidBranchID) {
+			return nil, fmt.Errorf("%w: branch id must consist of letters, digits, underscores and dashes, and cannot start with a dash", err)
+		}
 		return nil, err
 	}
 	newBranch, err := c.Store.CreateBranch(ctx, repositoryID, branchID, sourceRef)
@@ -443,11 +473,11 @@ func (c *Catalog) ListBranches(ctx context.Context, repository string, prefix st
 		if !strings.HasPrefix(branchID, prefix) {
 			break
 		}
-		branch := &Branch{
+		b := &Branch{
 			Name:      v.BranchID.String(),
 			Reference: v.CommitID.String(),
 		}
-		branches = append(branches, branch)
+		branches = append(branches, b)
 		if len(branches) >= limit+1 {
 			break
 		}
@@ -788,7 +818,7 @@ func (c *Catalog) ResetEntries(ctx context.Context, repository string, branch st
 	return c.Store.ResetPrefix(ctx, repositoryID, branchID, keyPrefix)
 }
 
-func (c *Catalog) Commit(ctx context.Context, repository, branch, message, committer string, metadata Metadata, date *int64) (*CommitLog, error) {
+func (c *Catalog) Commit(ctx context.Context, repository, branch, message, committer string, metadata Metadata, date *int64, sourceMetarange *string) (*CommitLog, error) {
 	repositoryID := graveler.RepositoryID(repository)
 	branchID := graveler.BranchID(branch)
 	if err := validator.Validate([]validator.ValidateArg{
@@ -797,12 +827,19 @@ func (c *Catalog) Commit(ctx context.Context, repository, branch, message, commi
 	}); err != nil {
 		return nil, err
 	}
-	commitID, err := c.Store.Commit(ctx, repositoryID, branchID, graveler.CommitParams{
+
+	p := graveler.CommitParams{
 		Committer: committer,
 		Message:   message,
 		Date:      date,
 		Metadata:  map[string]string(metadata),
-	})
+	}
+	if sourceMetarange != nil {
+		x := graveler.MetaRangeID(*sourceMetarange)
+		p.SourceMetaRange = &x
+	}
+
+	commitID, err := c.Store.Commit(ctx, repositoryID, branchID, p)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,7 +1175,7 @@ func listDiffHelper(it EntryDiffIterator, prefix, delimiter string, limit int, a
 	return diffs, hasMore, nil
 }
 
-func (c *Catalog) Merge(ctx context.Context, repository string, destinationBranch string, sourceRef string, committer string, message string, metadata Metadata) (string, error) {
+func (c *Catalog) Merge(ctx context.Context, repository string, destinationBranch string, sourceRef string, committer string, message string, metadata Metadata, strategy string) (string, error) {
 	repositoryID := graveler.RepositoryID(repository)
 	destination := graveler.BranchID(destinationBranch)
 	source := graveler.Ref(sourceRef)
@@ -1157,10 +1194,11 @@ func (c *Catalog) Merge(ctx context.Context, repository string, destinationBranc
 		{Name: "source", Value: source, Fn: graveler.ValidateRef},
 		{Name: "committer", Value: commitParams.Committer, Fn: validator.ValidateRequiredString},
 		{Name: "message", Value: commitParams.Message, Fn: validator.ValidateRequiredString},
+		{Name: "strategy", Value: strategy, Fn: graveler.ValidateRequiredStrategy},
 	}); err != nil {
 		return "", err
 	}
-	commitID, err := c.Store.Merge(ctx, repositoryID, destination, source, commitParams)
+	commitID, err := c.Store.Merge(ctx, repositoryID, destination, source, commitParams, strategy)
 	if errors.Is(err, graveler.ErrConflictFound) {
 		// for compatibility with old Catalog
 		return "", err
@@ -1207,12 +1245,37 @@ func (c *Catalog) LoadTags(ctx context.Context, repositoryID, tagsMetaRangeID st
 	return c.Store.LoadTags(ctx, graveler.RepositoryID(repositoryID), graveler.MetaRangeID(tagsMetaRangeID))
 }
 
-func (c *Catalog) GetMetaRange(ctx context.Context, repositoryID, metaRangeID string) (graveler.MetaRangeInfo, error) {
+func (c *Catalog) GetMetaRange(ctx context.Context, repositoryID, metaRangeID string) (graveler.MetaRangeAddress, error) {
 	return c.Store.GetMetaRange(ctx, graveler.RepositoryID(repositoryID), graveler.MetaRangeID(metaRangeID))
 }
 
-func (c *Catalog) GetRange(ctx context.Context, repositoryID, rangeID string) (graveler.RangeInfo, error) {
+func (c *Catalog) GetRange(ctx context.Context, repositoryID, rangeID string) (graveler.RangeAddress, error) {
 	return c.Store.GetRange(ctx, graveler.RepositoryID(repositoryID), graveler.RangeID(rangeID))
+}
+
+func (c *Catalog) WriteRange(ctx context.Context, repositoryID, fromSourceURI, prepend, after, continuationToken string) (*graveler.RangeInfo, *Mark, error) {
+	walker, err := c.walkerFactory.GetWalker(ctx, store.WalkerOptions{StorageURI: fromSourceURI})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating object-store walker: %w", err)
+	}
+
+	it, err := NewWalkEntryIterator(ctx, walker, prepend, after, continuationToken)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating walk iterator: %w", err)
+	}
+	defer it.Close()
+
+	rangeInfo, err := c.Store.WriteRange(ctx, graveler.RepositoryID(repositoryID), NewEntryToValueIterator(it))
+	if err != nil {
+		return nil, nil, fmt.Errorf("writing range from entry iterator: %w", err)
+	}
+	mark := it.Marker()
+
+	return rangeInfo, &mark, nil
+}
+
+func (c *Catalog) WriteMetaRange(ctx context.Context, repositoryID string, ranges []*graveler.RangeInfo) (*graveler.MetaRangeInfo, error) {
+	return c.Store.WriteMetaRange(ctx, graveler.RepositoryID(repositoryID), ranges)
 }
 
 func (c *Catalog) GetGarbageCollectionRules(ctx context.Context, repositoryID string) (*graveler.GarbageCollectionRules, error) {

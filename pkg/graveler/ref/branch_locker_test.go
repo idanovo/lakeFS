@@ -70,7 +70,8 @@ func TestBranchLock(t *testing.T) {
 		<-chAcquired
 		// check Writer waits (context gets to deadline before Writer callback is called)
 		timeToDeadline := time.Now().Add(time.Second)
-		ctxWithDeadline, _ := context.WithDeadline(ctx, timeToDeadline)
+		ctxWithDeadline, cancel := context.WithDeadline(ctx, timeToDeadline)
+		defer cancel()
 		_, err := bl.Writer(ctxWithDeadline, "committer_blocks_writer", testutil.DefaultBranchID, func() (interface{}, error) {
 			return nil, errUnexpectedCall
 		})
@@ -124,7 +125,7 @@ func panicOnMetadataUpdate(bl *ref.BranchLocker) {
 	go func() {
 		// ignore panics and release the function call
 		defer func() {
-			recover()
+			_ = recover()
 			close(chDone)
 		}()
 		ctx := context.Background()
