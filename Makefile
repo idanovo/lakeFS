@@ -3,6 +3,7 @@ DOCKER=$(or $(shell which docker), $(error "Missing dependency - no docker in PA
 GOBINPATH=$(shell $(GOCMD) env GOPATH)/bin
 NPM=$(or $(shell which npm), $(error "Missing dependency - no npm in PATH"))
 
+#my comment
 UID_GID := $(shell id -u):$(shell id -g)
 
 # Protoc is a Docker dependency (since it's a pain to install locally and manage versions of it)
